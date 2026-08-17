@@ -72,6 +72,12 @@ What it does:
    - A convex price base so that pre-season — when the per-90 stats are still 0
      — the optimizer still prefers a few genuine premium anchors over a flat
      spread. Minutes security down-weights anyone < 75% to play.
+   - **Team-strength prior:** attacking output is tempered by the player's own
+     team quality. It uses live **ClubElo** ratings (`api.clubelo.com`, free, no
+     key) — a forward-looking signal that rates a projected-relegation side down
+     *before* FPL publishes its own strengths — falling back to FPL's ratings,
+     then neutral. Attackers on low-rated sides get a "weak team attack" flag.
+     Skip the pull with `--no-elo`.
 4. Runs a constrained integer program that **maximises total expected points**
    under the FPL rules — 15 players (2/5/5/3), £100.0m, max 3 per club —
    **plus a per-player price cap** (default £13.0m) so no single £15m+ superstar

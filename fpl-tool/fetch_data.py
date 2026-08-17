@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import csv
+import datetime
+import io
 import json
 import os
 import sys
@@ -183,6 +186,44 @@ def current_and_next_gw(bootstrap: dict) -> tuple[int | None, int | None]:
 def get_element_summary(player_id: int) -> dict:
     """Per-player gameweek history + upcoming fixtures (used sparingly)."""
     return _get_json(f"element-summary/{player_id}")
+
+
+CLUBELO_URL = "https://api.clubelo.com"
+
+
+def get_club_elo(*, refresh: bool = True, offline: bool = False,
+                 on_date: str | None = None) -> dict[str, float]:
+    """Current club Elo ratings from ClubElo (free, no key). Maps club name ->
+    Elo. Forward-looking team strength that reflects current form/trajectory.
+
+    Cached to ./data/elo.json. Returns {} (graceful) if unreachable, so the
+    optimizer just falls back to FPL strength ratings.
+    """
+    name = "elo"
+    if offline:
+        return _load_cache(name) or {}
+    if not refresh:
+        cached = _load_cache(name)
+        if cached is not None:
+            return cached
+    date = on_date or datetime.date.today().isoformat()
+    try:
+        resp = requests.get(f"{CLUBELO_URL}/{date}", headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        text = resp.text
+    except requests.RequestException:
+        return _load_cache(name) or {}  # keep going without Elo
+    out: dict[str, float] = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        club, elo = row.get("Club"), row.get("Elo")
+        if club and elo:
+            try:
+                out[club] = float(elo)
+            except ValueError:
+                pass
+    if out:
+        _save_cache(name, out)
+    return out
 
 
 def _hist_float(value) -> float:

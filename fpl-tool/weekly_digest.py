@@ -109,8 +109,12 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
         ids, refresh=not offline, offline=offline,
         progress=lambda m: print(m, file=sys.stderr))
     weight = opt.weight_for_gw(next_gw)
+    elo_by_team = opt.map_elo_to_teams(
+        fetch_data.get_club_elo(refresh=not offline, offline=offline),
+        bootstrap["teams"])
 
-    players = opt.build_players(bootstrap, fixtures, horizon, last_season, weight)
+    players = opt.build_players(bootstrap, fixtures, horizon, last_season, weight,
+                               elo_by_team=elo_by_team)
     by_id = {p.id: p for p in players}
     el_by_id = {el["id"]: el for el in bootstrap["elements"]}
 

@@ -40,6 +40,7 @@ an optional minimum number of low-ownership *differential* picks.
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -96,6 +97,39 @@ FIX_SENSITIVITY = 0.15     # FDR-based general multiplier sensitivity
 # (they sit at 0 deep pre-season), then self-activates.
 TEAM_ATT_CLAMP = (0.80, 1.20)
 TEAM_WEAK_FLAG = 0.90      # below this, tag the pick so the concentration shows
+
+# ClubElo uses slightly different club names to FPL; map the mismatches to FPL
+# short names (keys are ClubElo names normalised to lowercase, letters only).
+ELO_ALIASES = {
+    "man united": "MUN", "man utd": "MUN", "manchester united": "MUN",
+    "man city": "MCI", "manchester city": "MCI",
+    "tottenham": "TOT", "spurs": "TOT",
+    "nottingham": "NFO", "nottingham forest": "NFO", "nottm forest": "NFO",
+    "wolverhampton": "WOL", "wolves": "WOL",
+}
+
+
+def _norm_name(s: str) -> str:
+    return re.sub(r"[^a-z ]", "", s.lower()).strip()
+
+
+def map_elo_to_teams(elo_by_name: dict[str, float], teams: list[dict]
+                     ) -> dict[int, float]:
+    """Map ClubElo {club_name: elo} onto FPL {team_id: elo}."""
+    short_to_id = {t["short_name"]: t["id"] for t in teams}
+    name_to_id = {_norm_name(t["name"]): t["id"] for t in teams}
+    out: dict[int, float] = {}
+    for cname, elo in elo_by_name.items():
+        n = _norm_name(cname)
+        tid = short_to_id.get(ELO_ALIASES.get(n, "")) or name_to_id.get(n)
+        if tid is None:  # last resort: substring match
+            for fn, i in name_to_id.items():
+                if n and (n in fn or fn in n):
+                    tid = i
+                    break
+        if tid is not None:
+            out[tid] = elo
+    return out
 
 # A pick is a "differential" below this effective-ownership %.
 DIFF_OWNERSHIP = 10.0
@@ -427,7 +461,8 @@ def _attacking_points(el: dict, pos: int, xg90: float, xa90: float,
 
 def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
                   last_season: dict[int, dict] | None = None,
-                  last_season_weight: float = LAST_SEASON_WEIGHT) -> list[Player]:
+                  last_season_weight: float = LAST_SEASON_WEIGHT,
+                  elo_by_team: dict[int, float] | None = None) -> list[Player]:
     teams = {t["id"]: t for t in bootstrap["teams"]}
     outlook = compute_team_outlook(fixtures, teams, horizon)
     last_season = last_season or {}
@@ -439,6 +474,12 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
     _att_vals = [v for t in teams.values()
                  for v in (t.get("strength_attack_home"), t.get("strength_attack_away")) if v]
     avg_att_strength = sum(_att_vals) / len(_att_vals) if _att_vals else 0.0
+    # ClubElo team-quality multipliers (preferred over FPL strength when present
+    # — a forward-looking signal available before FPL publishes its ratings).
+    elo_by_team = elo_by_team or {}
+    avg_elo = sum(elo_by_team.values()) / len(elo_by_team) if elo_by_team else 0.0
+    elo_mult = {tid: _clamp(e / avg_elo, *TEAM_ATT_CLAMP)
+                for tid, e in elo_by_team.items()} if avg_elo else {}
 
     players: list[Player] = []
     for el in bootstrap["elements"]:
@@ -456,10 +497,15 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
         hist = last_season.get(el["id"])
         xg90, xa90, cs90, eff_min = _effective_rates(el, hist, last_season_weight)
         attack_pts, xgi90, is_pen, is_sp = _attacking_points(el, pos, xg90, xa90, eff_min)
-        # Temper attacking output by the player's own team's attack strength.
-        team_att_mult = _team_attack_mult(team, avg_att_strength)
+        # Temper attacking output by team quality: ClubElo if we have it, else
+        # FPL's own attack-strength rating, else neutral.
+        has_elo = el["team"] in elo_mult
+        team_att_mult = elo_mult.get(el["team"]) if has_elo \
+            else _team_attack_mult(team, avg_att_strength)
         attack_pts *= team_att_mult
         cs_prob = _clean_sheet_prob(el, team, avg_def_strength, cs90, eff_min)
+        if has_elo:  # a stronger side keeps more clean sheets, and vice-versa
+            cs_prob = _clamp(cs_prob * team_att_mult, *CS_PROB_CLAMP)
         cs_pts = cs_prob * CS_PTS[pos]
 
         cost_m = el["now_cost"] / 10.0
@@ -612,7 +658,7 @@ def _squad_table(players: Iterable[Player]) -> str:
 
 def build_report(squad: list[Player], xi: list[Player], all_players: list[Player],
                  *, budget: int, max_player_cost: int, horizon: int,
-                 min_differentials: int, n_history: int = 0) -> str:
+                 min_differentials: int, n_history: int = 0, n_elo: int = 0) -> str:
     xi_ids = {p.id for p in xi}
     bench = [p for p in squad if p.id not in xi_ids]
     bench_gk = [p for p in bench if p.position == 1]
@@ -642,6 +688,8 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
     if n_history:
         out.append(f"**Goals/assists basis:** last season pooled with current "
                    f"for {n_history} players  ")
+    if n_elo:
+        out.append(f"**Team strength:** ClubElo ratings for {n_elo} clubs  ")
     out.append(f"**Starting XI formation:** {_formation(xi)}")
     out.append("")
 
@@ -781,7 +829,8 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         offline: bool, min_differentials: int, use_history: bool = True,
         min_bank_m: float = 2.0, max_bank_m: float = 5.0,
         min_premiums: int = 2, premium_cost_m: float = 9.0,
-        bench_gk_max_m: float = 4.5, max_per_club: int = 3) -> str:
+        bench_gk_max_m: float = 4.5, max_per_club: int = 3,
+        use_elo: bool = True) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
@@ -795,7 +844,16 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
             print(f"Last-season stats loaded for {len(last_season)} players.",
                   file=sys.stderr)
 
-    players = build_players(bootstrap, fixtures, horizon, last_season)
+    elo_by_team: dict[int, float] = {}
+    if use_elo:
+        elo_names = fetch_data.get_club_elo(refresh=not offline, offline=offline)
+        elo_by_team = map_elo_to_teams(elo_names, bootstrap["teams"])
+        if elo_by_team:
+            print(f"ClubElo team ratings loaded for {len(elo_by_team)} clubs.",
+                  file=sys.stderr)
+
+    players = build_players(bootstrap, fixtures, horizon, last_season,
+                            elo_by_team=elo_by_team)
     budget = int(round(budget_m * 10))
     max_player_cost = int(round(max_player_cost_m * 10))
 
@@ -810,7 +868,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
     return build_report(squad, xi, players, budget=budget,
                         max_player_cost=max_player_cost, horizon=horizon,
                         min_differentials=min_differentials,
-                        n_history=len(last_season))
+                        n_history=len(last_season), n_elo=len(elo_by_team))
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -848,13 +906,16 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-history", action="store_true",
                         help="skip the last-season pull (faster; weaker pre-season "
                              "goals/assists signal)")
+    parser.add_argument("--no-elo", action="store_true",
+                        help="skip the ClubElo team-strength pull (falls back to "
+                             "FPL's own ratings)")
     args = parser.parse_args(argv)
 
     try:
         report = run(budget_m=args.budget, max_player_cost_m=args.max_player_cost,
                      horizon=args.horizon, offline=args.offline,
                      min_differentials=args.differentials,
-                     use_history=not args.no_history,
+                     use_history=not args.no_history, use_elo=not args.no_elo,
                      min_bank_m=args.min_bank, max_bank_m=args.max_bank,
                      min_premiums=args.min_premiums, premium_cost_m=args.premium_cost,
                      bench_gk_max_m=args.bench_gk_max, max_per_club=args.max_per_club)

@@ -118,11 +118,16 @@ def fdr_multiplier(d):
 
 def team_outlook(fixtures, teams, horizon):
     """Per team: n_fix, avg_fdr, attack_ease, cs_ease, gen_ease, opponents."""
+    # Treat 0 as "not published yet" (FPL leaves strengths at 0 deep pre-season)
+    # so ease falls back to a neutral 1.0 and only FDR drives the weighting.
     def avg(keys):
-        vals = [t[k] for t in teams.values() for k in keys if t.get(k) is not None]
-        return sum(vals) / len(vals) if vals else 1.0
+        vals = [t[k] for t in teams.values() for k in keys if t.get(k)]
+        return sum(vals) / len(vals) if vals else 0.0
     avg_def = avg(("strength_defence_home", "strength_defence_away"))
     avg_att = avg(("strength_attack_home", "strength_attack_away"))
+
+    def ease(league_avg, opp):
+        return 1.0 if (not league_avg or not opp) else _clamp(league_avg / opp, *EASE_CLAMP)
 
     events = sorted({f["event"] for f in fixtures
                      if f["event"] is not None and not f.get("finished")})[:horizon]
@@ -142,8 +147,8 @@ def team_outlook(fixtures, teams, horizon):
                               else "strength_attack_home") or avg_att
             rec = acc.setdefault(tid, {"fdr": [], "att": [], "cs": [], "gen": [], "opp": []})
             rec["fdr"].append(diff)
-            rec["att"].append(_clamp(avg_def / opp_def, *EASE_CLAMP))
-            rec["cs"].append(_clamp(avg_att / opp_att, *EASE_CLAMP))
+            rec["att"].append(ease(avg_def, opp_def))
+            rec["cs"].append(ease(avg_att, opp_att))
             rec["gen"].append(fdr_multiplier(diff))
             rec["opp"].append(f"{opp.get('short_name', '?')} ({'H' if home else 'A'})")
     out = {}
@@ -160,8 +165,10 @@ def clean_sheet_prob(el, team, avg_def):
     cs90 = _f(el.get("clean_sheets_per_90"))
     if cs90 > 0:
         return _clamp(cs90, *CS_PROB_CLAMP)
-    tdef = (team.get("strength_defence_home", avg_def)
-            + team.get("strength_defence_away", avg_def)) / 2
+    tdef = ((team.get("strength_defence_home") or 0)
+            + (team.get("strength_defence_away") or 0)) / 2
+    if not avg_def or not tdef:   # strengths not published yet -> baseline
+        return CS_BASE_PROB
     return _clamp(CS_BASE_PROB * (tdef / avg_def), *CS_PROB_CLAMP)
 
 

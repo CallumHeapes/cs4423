@@ -195,13 +195,20 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
     fixtures in the horizon (double GWs add fixtures, blanks remove them).
     """
     # League-average strengths, used to normalise ease into a multiplier ~1.0.
+    # Treat 0 as "not published yet" (FPL leaves strengths at 0 deep pre-season)
+    # so we don't divide by zero — in that case ease falls back to a neutral 1.0
+    # and only FDR drives the fixture weighting.
     def _avg(side_keys):
-        vals = [t[k] for t in teams.values() for k in side_keys
-                if t.get(k) is not None]
-        return sum(vals) / len(vals) if vals else 1.0
+        vals = [t[k] for t in teams.values() for k in side_keys if t.get(k)]
+        return sum(vals) / len(vals) if vals else 0.0
 
     avg_def = _avg(("strength_defence_home", "strength_defence_away"))
     avg_att = _avg(("strength_attack_home", "strength_attack_away"))
+
+    def _safe_ease(league_avg: float, opp_strength: float) -> float:
+        if not league_avg or not opp_strength:
+            return 1.0
+        return _clamp(league_avg / opp_strength, *EASE_CLAMP)
 
     upcoming = sorted({f["event"] for f in fixtures
                        if f["event"] is not None and not f.get("finished")})[:horizon]
@@ -221,8 +228,8 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
                               else "strength_defence_home") or avg_def
             opp_att = opp.get("strength_attack_away" if is_home
                               else "strength_attack_home") or avg_att
-            attack_ease = _clamp(avg_def / opp_def, *EASE_CLAMP)
-            cs_ease = _clamp(avg_att / opp_att, *EASE_CLAMP)
+            attack_ease = _safe_ease(avg_def, opp_def)
+            cs_ease = _safe_ease(avg_att, opp_att)
             rec = acc.setdefault(team_id, {"fdr": [], "att": [], "cs": [],
                                            "gen": [], "opp": []})
             rec["fdr"].append(diff)
@@ -280,9 +287,12 @@ def _clean_sheet_prob(el: dict, team: dict, avg_def_strength: float) -> float:
     cs90 = _to_float(el.get("clean_sheets_per_90"))
     if cs90 > 0:  # real in-season signal
         return _clamp(cs90, *CS_PROB_CLAMP)
-    # Pre-season: infer from team defensive strength vs league average.
-    team_def = ((team.get("strength_defence_home", avg_def_strength)
-                 + team.get("strength_defence_away", avg_def_strength)) / 2)
+    # Pre-season: infer from team defensive strength vs league average. If the
+    # strengths aren't published yet (all 0), fall back to the league baseline.
+    team_def = ((team.get("strength_defence_home") or 0)
+                + (team.get("strength_defence_away") or 0)) / 2
+    if not avg_def_strength or not team_def:
+        return CS_BASE_PROB
     return _clamp(CS_BASE_PROB * (team_def / avg_def_strength), *CS_PROB_CLAMP)
 
 

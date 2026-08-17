@@ -1,3 +1,9 @@
 /.ipynb_checkpoints
 /.nbgrader.log
 *.pdf
+
+# fpl-tool: local data cache and personal team id
+/fpl-tool/data/
+/fpl-tool/team_id.txt
+__pycache__/
+*.pyc

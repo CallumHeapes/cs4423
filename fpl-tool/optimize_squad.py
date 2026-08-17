@@ -49,16 +49,22 @@ import fetch_data
 # Tunable model constants (documented so they can be adjusted with intent).
 # ---------------------------------------------------------------------------
 
-# How much each raw signal contributes to the "quality" points-per-game number.
-W_EP_NEXT = 0.45     # FPL's own expected points for next GW (best pre-season)
-W_FORM = 0.20        # recent points-per-game form
+# How much each performance signal adds ON TOP of the price-implied base.
+W_EP_NEXT = 0.50     # FPL's own expected points for next GW (best pre-season)
+W_FORM = 0.15        # recent points-per-game form
 W_PPG = 0.15         # season points-per-game
 W_TOTAL = 0.05       # last-season cumulative total (weighted LOW on purpose)
-W_PRICE = 0.15       # price-implied expectation (stabiliser / pre-season floor)
 
-# Convert £m -> expected points-per-game. Roughly: a £5.0m player ~2.3 ppg,
-# a £12.0m player ~5.4 ppg. Used as the pre-season floor / price signal.
-PRICE_TO_PPG = 0.45
+# Price-implied expectation is the pre-season BASE (performance stats are ~0
+# before a ball is kicked). It is deliberately CONVEX in price:
+#   base_ppg = PRICE_CONVEX_C * (cost_m ** PRICE_EXP)
+# so premiums carry disproportionately more ceiling and the optimizer prefers a
+# few genuine premium anchors funded by cheap enablers (a "barbell") rather than
+# a flat mid-price spread. PRICE_EXP = 1.0 would make points-per-£ constant and
+# leave the optimizer indifferent to premiums (the naive v1 behaviour); > 1.0
+# tips it toward anchors. The per-player price cap still bars true superstars.
+PRICE_EXP = 1.3
+PRICE_CONVEX_C = 0.18
 
 # Fixture sensitivity. FDR is 1 (easy) .. 5 (hard); difficulty 3 is neutral.
 # multiplier = 1 + FIX_SENSITIVITY * (3 - difficulty), clamped to [0.6, 1.4].
@@ -188,27 +194,29 @@ def _minutes_multiplier(chance: int | None, status: str) -> tuple[float, bool,
 
 
 def _quality_ppg(el: dict) -> float:
-    """Blend available signals into an expected points-per-game figure."""
+    """Expected points-per-game: a convex price base + performance signals.
+
+    Pre-season the performance terms are ~0, so quality is driven by the convex
+    price base — which rewards premium ceiling and produces a barbell squad.
+    Once the season starts, ep_next/form/ppg add real differentiation on top.
+    """
     ep_next = _to_float(el.get("ep_next"))
     form = _to_float(el.get("form"))
     ppg = _to_float(el.get("points_per_game"))
     total = _to_float(el.get("total_points"))
     cost_m = el["now_cost"] / 10.0
 
-    price_ppg = cost_m * PRICE_TO_PPG
+    base_ppg = PRICE_CONVEX_C * (cost_m ** PRICE_EXP)
     # Normalise last-season total into a per-game-ish figure (~38 games).
     total_ppg = total / 38.0
 
-    weighted = (
-        W_EP_NEXT * ep_next
+    return (
+        base_ppg
+        + W_EP_NEXT * ep_next
         + W_FORM * form
         + W_PPG * ppg
         + W_TOTAL * total_ppg
-        + W_PRICE * price_ppg
     )
-    # If every performance signal is zero (deep pre-season), the weighted sum
-    # collapses toward price only; keep a sane floor so the pool isn't flat.
-    return max(weighted, price_ppg * 0.5)
 
 
 def build_players(bootstrap: dict, fixtures: list[dict], horizon: int
@@ -481,10 +489,10 @@ def _main(argv: list[str] | None = None) -> int:
         description="Phase 1 — build an optimal 15-man FPL GW1 squad.")
     parser.add_argument("--budget", type=float, default=100.0,
                         help="total budget in £m (default 100.0)")
-    parser.add_argument("--max-player-cost", type=float, default=13.5,
+    parser.add_argument("--max-player-cost", type=float, default=13.0,
                         help="hard cap on any single player's price in £m "
-                             "(default 13.5 ≈ 13.5%% of budget — the "
-                             "anti-superstar constraint)")
+                             "(default 13.0 — lets £11-12m premiums anchor "
+                             "while still barring the £14m+ superstars)")
     parser.add_argument("--horizon", type=int, default=5,
                         help="fixture look-ahead in gameweeks (default 5)")
     parser.add_argument("--offline", action="store_true",

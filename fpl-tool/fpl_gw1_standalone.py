@@ -24,11 +24,15 @@ HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
 
 # ---- tunables ----
 BUDGET_M = 100.0            # total budget
-MAX_PLAYER_COST_M = 13.5    # hard per-player cap (anti-superstar, ~13.5% budget)
+MAX_PLAYER_COST_M = 13.0    # hard per-player cap: lets £11-12m premiums anchor,
+                            # still bars the £14m+ superstars (Haaland/Salah)
 HORIZON = 5                 # fixture look-ahead in gameweeks
 
-W_EP_NEXT, W_FORM, W_PPG, W_TOTAL, W_PRICE = 0.45, 0.20, 0.15, 0.05, 0.15
-PRICE_TO_PPG = 0.45
+# Performance weights add ON TOP of a CONVEX price base (see quality_ppg). The
+# convexity (PRICE_EXP > 1) is what makes the optimizer prefer a few premium
+# anchors funded by cheap enablers instead of a flat mid-price spread.
+W_EP_NEXT, W_FORM, W_PPG, W_TOTAL = 0.50, 0.15, 0.15, 0.05
+PRICE_EXP, PRICE_CONVEX_C = 1.3, 0.18
 FIX_SENSITIVITY = 0.15
 
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -85,10 +89,8 @@ def minutes_multiplier(chance, status):
 def quality_ppg(el):
     ep, form = _f(el.get("ep_next")), _f(el.get("form"))
     ppg, total = _f(el.get("points_per_game")), _f(el.get("total_points"))
-    price_ppg = el["now_cost"] / 10.0 * PRICE_TO_PPG
-    weighted = (W_EP_NEXT * ep + W_FORM * form + W_PPG * ppg
-                + W_TOTAL * total / 38.0 + W_PRICE * price_ppg)
-    return max(weighted, price_ppg * 0.5)
+    base = PRICE_CONVEX_C * ((el["now_cost"] / 10.0) ** PRICE_EXP)  # convex base
+    return base + W_EP_NEXT * ep + W_FORM * form + W_PPG * ppg + W_TOTAL * total / 38.0
 
 
 def fixture_multiplier(d):

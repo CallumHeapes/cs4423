@@ -59,6 +59,11 @@ CS_PROB_CLAMP = (0.05, 0.70)
 EASE_CLAMP = (0.70, 1.30)
 FIX_SENSITIVITY = 0.15
 DIFF_OWNERSHIP = 10.0
+# Team-quality prior: temper attacking output by the player's OWN team attack
+# strength vs the league average (a no-op until FPL publishes strength ratings,
+# which encode the market's season expectation, then self-activates).
+TEAM_ATT_CLAMP = (0.80, 1.20)
+TEAM_WEAK_FLAG = 0.90
 
 # Minutes-based reliability: shrink small-sample per-90 rates (pre-season cameos)
 # toward a modest price/position baseline, and clamp per-90 to realistic ceilings.
@@ -218,6 +223,14 @@ def team_outlook(fixtures, teams, horizon):
     return out, avg_def
 
 
+def team_attack_mult(team, avg_att):
+    own = ((team.get("strength_attack_home") or 0)
+           + (team.get("strength_attack_away") or 0)) / 2
+    if not avg_att or not own:
+        return 1.0
+    return _clamp(own / avg_att, *TEAM_ATT_CLAMP)
+
+
 def nailed_factor(hist):
     if hist is None:
         return NO_HISTORY_NAILED
@@ -271,6 +284,9 @@ def build_players(boot, fixtures, horizon, last_season=None):
     teams = {t["id"]: t for t in boot["teams"]}
     outlook, avg_def = team_outlook(fixtures, teams, horizon)
     last_season = last_season or {}
+    att_vals = [v for t in teams.values()
+                for v in (t.get("strength_attack_home"), t.get("strength_attack_away")) if v]
+    avg_att = sum(att_vals) / len(att_vals) if att_vals else 0.0
     players = []
     for el in boot["elements"]:
         pos = el["element_type"]
@@ -284,6 +300,8 @@ def build_players(boot, fixtures, horizon, last_season=None):
         hist = last_season.get(el["id"])
         xg90, xa90, cs90, eff_min = effective_rates(el, hist)
         attack_pts, xgi, is_pen, is_sp = attacking_points(el, pos, xg90, xa90, eff_min)
+        tam = team_attack_mult(team, avg_att)
+        attack_pts *= tam
         cs_pts = clean_sheet_prob(el, team, avg_def, cs90, eff_min) * CS_PTS[pos]
 
         cost_m = el["now_cost"] / 10.0
@@ -302,6 +320,8 @@ def build_players(boot, fixtures, horizon, last_season=None):
             flags.append("pen taker")
         if is_sp:
             flags.append("set pieces")
+        if pos in (3, 4) and tam <= TEAM_WEAK_FLAG:
+            flags.append("weak team attack")
         if hist and hist["minutes"] < NAILED_FLAG_MINUTES:
             flags.append(f"{int(hist['minutes'])}m last yr")
         if news and not any(news[:20] in x for x in flags):
@@ -483,6 +503,8 @@ def main():
     ap.add_argument("--min-premiums", type=int, default=MIN_PREMIUMS)
     ap.add_argument("--premium-cost", type=float, default=PREMIUM_COST_M)
     ap.add_argument("--bench-gk-max", type=float, default=BENCH_GK_MAX_M)
+    ap.add_argument("--max-per-club", type=int, default=3,
+                    help="max players from one club (set 2 to avoid over-loading a team)")
     ap.add_argument("--no-history", action="store_true",
                     help="skip the last-season pull (faster, weaker pre-season signal)")
     args, _ = ap.parse_known_args()  # ignore Colab/Jupyter's own argv
@@ -499,6 +521,7 @@ def main():
     budget = int(round(args.budget * 10))
     max_cost = int(round(args.max_player_cost * 10))
     squad = solve_squad(players, budget, max_cost, args.differentials,
+                        max_per_club=args.max_per_club,
                         min_bank=int(round(args.min_bank * 10)),
                         max_bank=int(round(args.max_bank * 10)),
                         min_premiums=args.min_premiums,

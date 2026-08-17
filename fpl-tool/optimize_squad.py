@@ -88,6 +88,15 @@ CS_PROB_CLAMP = (0.05, 0.70)
 EASE_CLAMP = (0.70, 1.30)
 FIX_SENSITIVITY = 0.15     # FDR-based general multiplier sensitivity
 
+# Team-quality prior: an attacker in a weak team creates/finishes fewer chances,
+# so scale attacking output by the player's OWN team attack strength vs the
+# league average (FPL's strength_attack_* ratings — which encode the market's
+# season expectation, so a projected-relegation side is rated down). Clamped so
+# it tempers rather than dominates. It's a no-op until FPL publishes the ratings
+# (they sit at 0 deep pre-season), then self-activates.
+TEAM_ATT_CLAMP = (0.80, 1.20)
+TEAM_WEAK_FLAG = 0.90      # below this, tag the pick so the concentration shows
+
 # A pick is a "differential" below this effective-ownership %.
 DIFF_OWNERSHIP = 10.0
 
@@ -329,6 +338,16 @@ def _minutes_multiplier(chance: int | None, status: str) -> tuple[float, bool,
     return 0.10, True, flags
 
 
+def _team_attack_mult(team: dict, avg_att_strength: float) -> float:
+    """Scale attacking output by the team's own attack strength vs the league
+    average. No-op (1.0) until FPL publishes strength ratings."""
+    own = ((team.get("strength_attack_home") or 0)
+           + (team.get("strength_attack_away") or 0)) / 2
+    if not avg_att_strength or not own:
+        return 1.0
+    return _clamp(own / avg_att_strength, *TEAM_ATT_CLAMP)
+
+
 def _nailed_factor(el: dict, hist: dict | None) -> float:
     """Down-weight players who look like backups — few minutes across BOTH this
     season and last. Counting current minutes means a breakout starter who was a
@@ -416,6 +435,10 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
         sum((t.get("strength_defence_home", 0) + t.get("strength_defence_away", 0)) / 2
             for t in teams.values()) / max(1, len(teams))
     ) or 1.0
+    # League-average attack strength (0s = unpublished; filtered out).
+    _att_vals = [v for t in teams.values()
+                 for v in (t.get("strength_attack_home"), t.get("strength_attack_away")) if v]
+    avg_att_strength = sum(_att_vals) / len(_att_vals) if _att_vals else 0.0
 
     players: list[Player] = []
     for el in bootstrap["elements"]:
@@ -433,6 +456,9 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
         hist = last_season.get(el["id"])
         xg90, xa90, cs90, eff_min = _effective_rates(el, hist, last_season_weight)
         attack_pts, xgi90, is_pen, is_sp = _attacking_points(el, pos, xg90, xa90, eff_min)
+        # Temper attacking output by the player's own team's attack strength.
+        team_att_mult = _team_attack_mult(team, avg_att_strength)
+        attack_pts *= team_att_mult
         cs_prob = _clean_sheet_prob(el, team, avg_def_strength, cs90, eff_min)
         cs_pts = cs_prob * CS_PTS[pos]
 
@@ -459,6 +485,8 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
             flags.append("pen taker")
         if is_sp:
             flags.append("set pieces")
+        if pos in (3, 4) and team_att_mult <= TEAM_WEAK_FLAG:
+            flags.append("weak team attack")
         if hist and hist["minutes"] < NAILED_FLAG_MINUTES:
             flags.append(f"{int(hist['minutes'])}m last yr")
         if news and not any(news[:20] in f for f in flags):
@@ -753,7 +781,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         offline: bool, min_differentials: int, use_history: bool = True,
         min_bank_m: float = 2.0, max_bank_m: float = 5.0,
         min_premiums: int = 2, premium_cost_m: float = 9.0,
-        bench_gk_max_m: float = 4.5) -> str:
+        bench_gk_max_m: float = 4.5, max_per_club: int = 3) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
@@ -773,7 +801,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
 
     squad = optimize_squad(
         players, budget=budget, max_player_cost=max_player_cost,
-        min_differentials=min_differentials,
+        max_per_club=max_per_club, min_differentials=min_differentials,
         min_bank=int(round(min_bank_m * 10)),
         max_bank=int(round(max_bank_m * 10)),
         min_premiums=min_premiums, premium_cost=int(round(premium_cost_m * 10)),
@@ -812,6 +840,9 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bench-gk-max", type=float, default=4.5,
                         help="require a cheap bench keeper at or below this £m so "
                              "budget isn't wasted on a non-playing #2 (default 4.5)")
+    parser.add_argument("--max-per-club", type=int, default=3,
+                        help="max players from one club (FPL allows 3; set 2 to "
+                             "avoid over-loading a team you're bearish on)")
     parser.add_argument("--offline", action="store_true",
                         help="use the cached ./data snapshot instead of fetching live")
     parser.add_argument("--no-history", action="store_true",
@@ -826,7 +857,7 @@ def _main(argv: list[str] | None = None) -> int:
                      use_history=not args.no_history,
                      min_bank_m=args.min_bank, max_bank_m=args.max_bank,
                      min_premiums=args.min_premiums, premium_cost_m=args.premium_cost,
-                     bench_gk_max_m=args.bench_gk_max)
+                     bench_gk_max_m=args.bench_gk_max, max_per_club=args.max_per_club)
     except (RuntimeError, OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

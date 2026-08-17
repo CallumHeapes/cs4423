@@ -115,6 +115,18 @@ LAST_SEASON_WEIGHT = 0.80
 # applies to players with PL history; new signings have no history to judge.
 NAILED_FLAG_MINUTES = 1000
 
+# Nailed-minutes guard. The optimizer loves cheap enablers, but a cheap player
+# who barely featured last season is usually a backup the model can't see is
+# second-choice. Scale each score by how nailed they look: full trust at
+# NAILED_FULL_MINUTES, down to NAILED_FLOOR for a near-zero-minute player. This
+# directly serves the "prefer secure minutes, especially in defence" preference
+# — a nailed £4.5m keeper now beats a 90-minute #3. Players with NO PL history
+# (new signings, promoted clubs) can't be judged, so they get a mild neutral
+# discount rather than the full penalty.
+NAILED_FULL_MINUTES = 2000
+NAILED_FLOOR = 0.50
+NO_HISTORY_NAILED = 0.85
+
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}  # GK, DEF, MID, FWD (hard FPL squad rule)
 SQUAD_SIZE = 15
@@ -306,6 +318,19 @@ def _minutes_multiplier(chance: int | None, status: str) -> tuple[float, bool,
     return 0.10, True, flags
 
 
+def _nailed_factor(hist: dict | None) -> float:
+    """Down-weight players who barely featured last season (likely backups).
+
+    New signings / promoted-club players have no PL history to judge, so they
+    get a mild neutral discount rather than the full penalty.
+    """
+    if hist is None:
+        return NO_HISTORY_NAILED
+    mins = hist.get("minutes", 0)
+    return _clamp(NAILED_FLOOR + (1 - NAILED_FLOOR) * (mins / NAILED_FULL_MINUTES),
+                  NAILED_FLOOR, 1.0)
+
+
 def _effective_rates(el: dict, hist: dict | None
                      ) -> tuple[float, float, float, float]:
     """Pool current-season totals with last season into per-90 rates.
@@ -411,7 +436,7 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
                     + W_ATTACK * attack_pts * attack_ease
                     + W_CS * cs_pts * cs_ease
                     + saves_pts)
-        score = per_game * minutes_mult * n_fix
+        score = per_game * minutes_mult * n_fix * _nailed_factor(hist)
 
         selected_by = _to_float(el.get("selected_by_percent"))
         news = (el.get("news") or "").strip()

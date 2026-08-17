@@ -68,6 +68,10 @@ ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
 LAST_SEASON_WEIGHT = 0.80
 USE_HISTORY = True          # set False (or --no-history) to skip the per-player pull
 NAILED_FLAG_MINUTES = 1000  # flag players with few minutes last season (fringe)
+# Nailed-minutes guard: down-weight cheap players who barely featured last season
+# (likely backups). Full trust at NAILED_FULL_MINUTES; new signings/promoted (no
+# history) get a mild neutral discount, not the full penalty.
+NAILED_FULL_MINUTES, NAILED_FLOOR, NO_HISTORY_NAILED = 2000, 0.50, 0.85
 
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}
@@ -209,6 +213,14 @@ def team_outlook(fixtures, teams, horizon):
     return out, avg_def
 
 
+def nailed_factor(hist):
+    if hist is None:
+        return NO_HISTORY_NAILED
+    m = hist.get("minutes", 0)
+    return _clamp(NAILED_FLOOR + (1 - NAILED_FLOOR) * (m / NAILED_FULL_MINUTES),
+                  NAILED_FLOOR, 1.0)
+
+
 def effective_rates(el, hist):
     """Pool current-season totals with last season -> (xg90, xa90, cs90, eff_min)."""
     cur_min = _f(el.get("minutes"))
@@ -277,7 +289,7 @@ def build_players(boot, fixtures, horizon, last_season=None):
                    + W_TOTAL * _f(el.get("total_points")) / 38.0)
         per_game = (generic * gen_ease + W_ATTACK * attack_pts * att_ease
                     + W_CS * cs_pts * cs_ease + saves)
-        score = per_game * mult * n_fix
+        score = per_game * mult * n_fix * nailed_factor(hist)
 
         own = _f(el.get("selected_by_percent"))
         news = (el.get("news") or "").strip()

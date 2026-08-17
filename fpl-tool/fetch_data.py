@@ -159,6 +159,27 @@ def get_entry_picks(gw: int, team_id: int | None = None) -> dict:
     return _get_json(f"entry/{team_id}/event/{gw}/picks")
 
 
+def get_entry_history(team_id: int | None = None) -> dict:
+    """Your season history: per-GW points/bank/value + chips used."""
+    team_id = team_id or default_team_id()
+    return _get_json(f"entry/{team_id}/history")
+
+
+def current_and_next_gw(bootstrap: dict) -> tuple[int | None, int | None]:
+    """From bootstrap events, the current (last locked) and next gameweek ids."""
+    current = next_gw = None
+    for ev in bootstrap.get("events", []):
+        if ev.get("is_current"):
+            current = ev["id"]
+        if ev.get("is_next"):
+            next_gw = ev["id"]
+    if next_gw is None:  # end of season, or pre-season before any 'next'
+        upcoming = [ev["id"] for ev in bootstrap.get("events", [])
+                    if not ev.get("finished")]
+        next_gw = min(upcoming) if upcoming else current
+    return current, next_gw
+
+
 def get_element_summary(player_id: int) -> dict:
     """Per-player gameweek history + upcoming fixtures (used sparingly)."""
     return _get_json(f"element-summary/{player_id}")

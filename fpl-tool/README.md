@@ -103,8 +103,36 @@ python fetch_data.py --entry    # also your entry info (bank, rank)
 
 ## Phase 2 — weekly in-season digest
 
-`weekly_digest.py` (to be built after the GW1 deadline locks) will pull your
-actual squad, bank, free transfers and chips, run a fixture-difficulty check
-over the next 4-6 GWs, flag players on bad runs / form dips / price drops,
-suggest budget-matched transfers, and recommend a captain — output as a single
-markdown digest.
+```bash
+python weekly_digest.py                    # your team, next deadline
+python weekly_digest.py --free-transfers 2 # tell it how many FTs you have
+python weekly_digest.py --horizon 6
+```
+
+`weekly_digest.py` pulls your actual squad (`/entry/5156799/event/{gw}/picks`),
+bank, chips, and current captain, then produces one markdown digest:
+
+1. Fixture outlook over the next `--horizon` GWs for every club you own.
+2. **Flags** each owned player for bad fixture runs, form dips, price-drop risk
+   (heavy net transfers out), or availability (injury/suspension/doubt).
+3. **Budget-matched transfer suggestions** (1–2 per flagged player) — same
+   position, affordable from your sale value + bank, rule-legal (max 3/club),
+   ranked by projected-points gain.
+4. A **transfer plan** that respects your free transfers and only advises a
+   −4 hit when the gain clearly beats it (roll otherwise).
+5. **Captain / vice** for the upcoming GW on attacking threat + fixtures.
+
+It reuses the exact scoring model from `optimize_squad.py`, but the last-season
+weight **decays with the gameweek** (`weight_for_gw`: 0.8 at GW1 → 0 by ~GW20),
+so last year's data phases out on its own and current form takes over — no
+manual switchover.
+
+> The public API can't reliably report your free-transfer count, so pass
+> `--free-transfers N` (default 1).
+
+## One-tap Colab notebook
+
+`FPL_Corrib_Athletic.ipynb` — open it in [Google Colab](https://colab.research.google.com)
+(File → Open notebook → GitHub, or upload it), then run the **Setup** cell and
+whichever phase you need. It clones the latest code and fetches fresh data each
+run, so you're always current. Ideal for running from a phone before a deadline.

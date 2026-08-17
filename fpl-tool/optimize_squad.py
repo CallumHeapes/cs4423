@@ -109,6 +109,17 @@ ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
 # accrue. Last season is down-weighted (players change), and promoted-club or
 # overseas players with no PL history just fall back to the price baseline.
 LAST_SEASON_WEIGHT = 0.80
+# Last season's weight decays to 0 over the first DECAY_GWS gameweeks, so by
+# mid-season the model runs on pure current-season data (see weight_for_gw).
+DECAY_GWS = 19
+
+
+def weight_for_gw(gw: int) -> float:
+    """Last-season blend weight for a given gameweek: full pre-season/GW1,
+    tapering linearly to 0 by DECAY_GWS."""
+    if gw <= 1:
+        return LAST_SEASON_WEIGHT
+    return max(0.0, LAST_SEASON_WEIGHT * (1 - (gw - 1) / DECAY_GWS))
 
 # Flag players whose last season had few minutes (known fringe/rotation/backup)
 # so a cheap non-starter — e.g. a #2 keeper — is visible for the eye-test. Only
@@ -318,22 +329,25 @@ def _minutes_multiplier(chance: int | None, status: str) -> tuple[float, bool,
     return 0.10, True, flags
 
 
-def _nailed_factor(hist: dict | None) -> float:
-    """Down-weight players who barely featured last season (likely backups).
-
-    New signings / promoted-club players have no PL history to judge, so they
-    get a mild neutral discount rather than the full penalty.
+def _nailed_factor(el: dict, hist: dict | None) -> float:
+    """Down-weight players who look like backups — few minutes across BOTH this
+    season and last. Counting current minutes means a breakout starter who was a
+    fringe player last year self-corrects as the season runs. Players with no
+    history and no current minutes get a mild neutral discount, not the penalty.
     """
-    if hist is None:
+    cur_min = _to_float(el.get("minutes"))
+    last_min = hist["minutes"] if hist else 0.0
+    if hist is None and cur_min == 0:
         return NO_HISTORY_NAILED
-    mins = hist.get("minutes", 0)
+    mins = cur_min + last_min
     return _clamp(NAILED_FLOOR + (1 - NAILED_FLOOR) * (mins / NAILED_FULL_MINUTES),
                   NAILED_FLOOR, 1.0)
 
 
-def _effective_rates(el: dict, hist: dict | None
+def _effective_rates(el: dict, hist: dict | None, weight: float = LAST_SEASON_WEIGHT
                      ) -> tuple[float, float, float, float]:
-    """Pool current-season totals with last season into per-90 rates.
+    """Pool current-season totals with last season (down-weighted) into per-90
+    rates. `weight` decays toward 0 through the season so last year phases out.
 
     Returns (xg90, xa90, cs90, effective_minutes). Pre-season the current-season
     totals are ~0 so the rates come from last season; the effective-minutes
@@ -341,14 +355,14 @@ def _effective_rates(el: dict, hist: dict | None
     """
     cur_min = _to_float(el.get("minutes"))
     last_min = hist["minutes"] if hist else 0.0
-    eff_min = cur_min + LAST_SEASON_WEIGHT * last_min
+    eff_min = cur_min + weight * last_min
     if eff_min <= 0:
         return 0.0, 0.0, 0.0, 0.0
 
     def pooled(cur_key: str, last_key: str) -> float:
         cur = _to_float(el.get(cur_key))
         last = hist[last_key] if hist else 0.0
-        return (cur + LAST_SEASON_WEIGHT * last) / (eff_min / 90.0)
+        return (cur + weight * last) / (eff_min / 90.0)
 
     xg90 = min(pooled("expected_goals", "xg"), XG90_CAP)
     xa90 = min(pooled("expected_assists", "xa"), XA90_CAP)
@@ -393,7 +407,8 @@ def _attacking_points(el: dict, pos: int, xg90: float, xa90: float,
 
 
 def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
-                  last_season: dict[int, dict] | None = None) -> list[Player]:
+                  last_season: dict[int, dict] | None = None,
+                  last_season_weight: float = LAST_SEASON_WEIGHT) -> list[Player]:
     teams = {t["id"]: t for t in bootstrap["teams"]}
     outlook = compute_team_outlook(fixtures, teams, horizon)
     last_season = last_season or {}
@@ -416,7 +431,7 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
         minutes_mult, risky, flags = _minutes_multiplier(chance, el.get("status", "a"))
 
         hist = last_season.get(el["id"])
-        xg90, xa90, cs90, eff_min = _effective_rates(el, hist)
+        xg90, xa90, cs90, eff_min = _effective_rates(el, hist, last_season_weight)
         attack_pts, xgi90, is_pen, is_sp = _attacking_points(el, pos, xg90, xa90, eff_min)
         cs_prob = _clean_sheet_prob(el, team, avg_def_strength, cs90, eff_min)
         cs_pts = cs_prob * CS_PTS[pos]
@@ -436,7 +451,7 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
                     + W_ATTACK * attack_pts * attack_ease
                     + W_CS * cs_pts * cs_ease
                     + saves_pts)
-        score = per_game * minutes_mult * n_fix * _nailed_factor(hist)
+        score = per_game * minutes_mult * n_fix * _nailed_factor(el, hist)
 
         selected_by = _to_float(el.get("selected_by_percent"))
         news = (el.get("news") or "").strip()

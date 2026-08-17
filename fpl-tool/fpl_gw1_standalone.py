@@ -23,6 +23,7 @@ starts 5 defenders (always 2-3 fwd, 3-5 mid), a bench, and captain picks.
 
 from __future__ import annotations
 import argparse
+import concurrent.futures
 import time
 import requests
 import pulp
@@ -60,6 +61,12 @@ MINUTES_ANCHOR = 900
 XG90_CAP, XA90_CAP = 1.10, 0.70
 ATTACK_BASELINE_C = 0.20
 ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
+# Last season's totals (from element-summary history_past) are pooled with the
+# current season so pre-season we score on a real sample, down-weighted since
+# players change. Promoted-club / overseas players with no PL history fall back
+# to the price baseline.
+LAST_SEASON_WEIGHT = 0.80
+USE_HISTORY = True          # set False (or --no-history) to skip the per-player pull
 
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}
@@ -91,6 +98,39 @@ def _f(v, default=0.0):
         return default if v in (None, "") else float(v)
     except (TypeError, ValueError):
         return default
+
+
+def _fetch_one_history(pid):
+    """Last completed season's totals for one player via history_past."""
+    try:
+        data = _get(f"element-summary/{pid}", retries=2, timeout=20)
+    except RuntimeError:
+        return pid, None
+    past = data.get("history_past") or []
+    if not past:
+        return pid, None
+    s = past[-1]
+    return pid, {"minutes": _f(s.get("minutes")),
+                 "xg": _f(s.get("expected_goals")) or _f(s.get("goals_scored")),
+                 "xa": _f(s.get("expected_assists")) or _f(s.get("assists")),
+                 "cs": _f(s.get("clean_sheets"))}
+
+
+def get_last_season_stats(player_ids, workers=6):
+    """Map player_id -> last-season {minutes, xg, xa, cs}. One call per player,
+    threaded. Failures are skipped (those players use the price baseline)."""
+    print(f"Fetching last-season stats for {len(player_ids)} players "
+          "(one-off, ~30-60s)...")
+    out, done = {}, 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for pid, rec in ex.map(_fetch_one_history, player_ids):
+            if rec:
+                out[pid] = rec
+            done += 1
+            if done % 150 == 0:
+                print(f"  ...{done}/{len(player_ids)}")
+    print(f"Last-season stats loaded for {len(out)} players.")
+    return out
 
 
 def _clamp(x, lo, hi):
@@ -168,9 +208,24 @@ def team_outlook(fixtures, teams, horizon):
     return out, avg_def
 
 
-def clean_sheet_prob(el, team, avg_def):
-    cs90 = _f(el.get("clean_sheets_per_90"))
-    if cs90 > 0:
+def effective_rates(el, hist):
+    """Pool current-season totals with last season -> (xg90, xa90, cs90, eff_min)."""
+    cur_min = _f(el.get("minutes"))
+    last_min = hist["minutes"] if hist else 0.0
+    eff_min = cur_min + LAST_SEASON_WEIGHT * last_min
+    if eff_min <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    def pooled(cur_key, last_key):
+        cur = _f(el.get(cur_key))
+        last = hist[last_key] if hist else 0.0
+        return (cur + LAST_SEASON_WEIGHT * last) / (eff_min / 90.0)
+    return (min(pooled("expected_goals", "xg"), XG90_CAP),
+            min(pooled("expected_assists", "xa"), XA90_CAP),
+            pooled("clean_sheets", "cs"), eff_min)
+
+
+def clean_sheet_prob(el, team, avg_def, cs90, eff_min):
+    if eff_min > 0 and cs90 > 0:
         return _clamp(cs90, *CS_PROB_CLAMP)
     tdef = ((team.get("strength_defence_home") or 0)
             + (team.get("strength_defence_away") or 0)) / 2
@@ -179,9 +234,7 @@ def clean_sheet_prob(el, team, avg_def):
     return _clamp(CS_BASE_PROB * (tdef / avg_def), *CS_PROB_CLAMP)
 
 
-def attacking_points(el, pos):
-    xg = min(_f(el.get("expected_goals_per_90")), XG90_CAP)
-    xa = min(_f(el.get("expected_assists_per_90")), XA90_CAP)
+def attacking_points(el, pos, xg, xa, eff_min):
     is_pen = el.get("penalties_order") == 1
     is_sp = (el.get("direct_freekicks_order") == 1
              or el.get("corners_and_indirect_freekicks_order") == 1)
@@ -190,18 +243,16 @@ def attacking_points(el, pos):
     if is_sp:
         xa += SETPIECE_XA_BONUS
     raw = xg * GOAL_PTS[pos] + xa * ASSIST_PTS
-    # minutes reliability shrinkage toward a modest price/position baseline
-    mins = _f(el.get("minutes"))
-    rel = mins / (mins + MINUTES_ANCHOR) if mins > 0 else 0.0
+    rel = eff_min / (eff_min + MINUTES_ANCHOR) if eff_min > 0 else 0.0
     baseline = ATTACK_BASELINE_C * (el["now_cost"] / 10.0) * ATTACK_POS_FACTOR[pos]
     attack = rel * raw + (1 - rel) * baseline
-    xgi = min(_f(el.get("expected_goal_involvements_per_90")) or (xg + xa), XG90_CAP + XA90_CAP)
-    return attack, xgi, is_pen, is_sp
+    return attack, min(xg + xa, XG90_CAP + XA90_CAP), is_pen, is_sp
 
 
-def build_players(boot, fixtures, horizon):
+def build_players(boot, fixtures, horizon, last_season=None):
     teams = {t["id"]: t for t in boot["teams"]}
     outlook, avg_def = team_outlook(fixtures, teams, horizon)
+    last_season = last_season or {}
     players = []
     for el in boot["elements"]:
         pos = el["element_type"]
@@ -212,8 +263,10 @@ def build_players(boot, fixtures, horizon):
 
         chance = el.get("chance_of_playing_next_round")
         mult, risky, flags = minutes_multiplier(chance, el.get("status", "a"))
-        attack_pts, xgi, is_pen, is_sp = attacking_points(el, pos)
-        cs_pts = clean_sheet_prob(el, team, avg_def) * CS_PTS[pos]
+        hist = last_season.get(el["id"])
+        xg90, xa90, cs90, eff_min = effective_rates(el, hist)
+        attack_pts, xgi, is_pen, is_sp = attacking_points(el, pos, xg90, xa90, eff_min)
+        cs_pts = clean_sheet_prob(el, team, avg_def, cs90, eff_min) * CS_PTS[pos]
 
         cost_m = el["now_cost"] / 10.0
         base = PRICE_CONVEX_C * (cost_m ** PRICE_EXP)
@@ -299,7 +352,7 @@ def cap_key(p):
     return p["score"]
 
 
-def report(squad, xi, allp, budget, max_cost, horizon, min_diff):
+def report(squad, xi, allp, budget, max_cost, horizon, min_diff, n_history=0):
     xi_ids = {p["id"] for p in xi}
     bench = [p for p in squad if p["id"] not in xi_ids]
     bench = ([p for p in bench if p["pos"] == 1]
@@ -314,10 +367,12 @@ def report(squad, xi, allp, budget, max_cost, horizon, min_diff):
     counts = {pos: sum(1 for p in xi if p["pos"] == pos) for pos in POSITIONS}
     formation = f"{counts[2]}-{counts[3]}-{counts[4]}"
 
+    hist_note = (f" · **G/A basis:** last season pooled for {n_history} players"
+                 if n_history else "")
     out = ["# FPL Gameweek 1 — Optimised 15-Man Squad\n",
            f"**Budget:** £{total/10:.1f}m of £{budget/10:.1f}m "
            f"(£{(budget-total)/10:.1f}m bank) · **Cap:** £{max_cost/10:.1f}m "
-           f"· **Horizon:** {horizon} GWs · **Formation:** {formation}\n",
+           f"· **Horizon:** {horizon} GWs · **Formation:** {formation}{hist_note}\n",
            "## Full squad (15)\n", table(squad), "",
            f"## Starting XI ({formation})\n", table(xi), "",
            "## Bench (priority order)\n"]
@@ -386,18 +441,25 @@ def main():
     ap.add_argument("--max-player-cost", type=float, default=MAX_PLAYER_COST_M)
     ap.add_argument("--horizon", type=int, default=HORIZON)
     ap.add_argument("--differentials", type=int, default=MIN_DIFFERENTIALS)
+    ap.add_argument("--no-history", action="store_true",
+                    help="skip the last-season pull (faster, weaker pre-season signal)")
     args, _ = ap.parse_known_args()  # ignore Colab/Jupyter's own argv
 
     print("Fetching live FPL data ...")
     boot = _get("bootstrap-static")
     fixtures = _get("fixtures")
-    players = build_players(boot, fixtures, args.horizon)
+
+    last_season = {}
+    if USE_HISTORY and not args.no_history:
+        last_season = get_last_season_stats([el["id"] for el in boot["elements"]])
+
+    players = build_players(boot, fixtures, args.horizon, last_season)
     budget = int(round(args.budget * 10))
     max_cost = int(round(args.max_player_cost * 10))
     squad = solve_squad(players, budget, max_cost, args.differentials)
     xi = solve_xi(squad)
     print("\n" + report(squad, xi, players, budget, max_cost, args.horizon,
-                        args.differentials))
+                        args.differentials, len(last_season)))
 
 
 if __name__ == "__main__":

@@ -44,9 +44,16 @@ What it does:
    opponent attacks → more clean sheets) — plus FDR. Double gameweeks and
    blanks fall out naturally.
 3. **Scores every player on expected FPL points**, not just price:
-   - Attacking threat: `expected_goals_per_90` + `expected_assists_per_90`
+   - **Last season pooled with current** (via each player's `history_past`):
+     pre-season the goals/assists/clean-sheet rates come from last season's real
+     sample (with last season's minutes driving how much they're trusted), and
+     the current season takes over as games accrue. Promoted-club and overseas
+     players with no PL history fall back to the price baseline — a deliberate,
+     accepted gap. Skip this slower per-player pull with `--no-history`.
+   - Attacking threat: pooled `expected_goals` + `expected_assists` per 90
      converted to points at the position's goal value + 3/assist, with a bump
-     for penalty and set-piece takers.
+     for penalty and set-piece takers, and minutes-based shrinkage so freak
+     small-sample rates can't dominate.
    - Clean sheets: defenders and keepers are ranked further on a clean-sheet
      probability (team defensive strength, or `clean_sheets_per_90` in-season),
      worth 4 pts (GK/DEF) / 1 pt (MID); keepers also get save points.

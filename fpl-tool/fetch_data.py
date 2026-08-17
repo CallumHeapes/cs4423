@@ -21,6 +21,7 @@ Run directly to refresh the on-disk cache:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import sys
@@ -161,6 +162,68 @@ def get_entry_picks(gw: int, team_id: int | None = None) -> dict:
 def get_element_summary(player_id: int) -> dict:
     """Per-player gameweek history + upcoming fixtures (used sparingly)."""
     return _get_json(f"element-summary/{player_id}")
+
+
+def _hist_float(value) -> float:
+    try:
+        return float(value) if value not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fetch_one_history(player_id: int) -> tuple[int, dict | None]:
+    """Last completed season's totals for one player (via history_past)."""
+    try:
+        data = _get_json(f"element-summary/{player_id}", retries=2, timeout=20)
+    except RuntimeError:
+        return player_id, None
+    past = data.get("history_past") or []
+    if not past:
+        return player_id, None
+    s = past[-1]  # most recent prior season
+    minutes = _hist_float(s.get("minutes"))
+    return player_id, {
+        "season": s.get("season_name"),
+        "minutes": minutes,
+        # Prefer expected stats; fall back to actual goals/assists for older
+        # seasons that predate xG in the API.
+        "xg": _hist_float(s.get("expected_goals")) or _hist_float(s.get("goals_scored")),
+        "xa": _hist_float(s.get("expected_assists")) or _hist_float(s.get("assists")),
+        "cs": _hist_float(s.get("clean_sheets")),
+    }
+
+
+def get_last_season_stats(player_ids, *, refresh: bool = True,
+                          offline: bool = False, workers: int = 6,
+                          progress=None) -> dict[int, dict]:
+    """Map player_id -> last-season {minutes, xg, xa, cs} via element-summary.
+
+    Cached to ./data/last_season.json and fetched incrementally (only ids not
+    already cached). One HTTP call per player, so it is threaded. Failures are
+    skipped silently — those players just fall back to the price baseline.
+    """
+    name = "last_season"
+    cache_raw = _load_cache(name) or {}
+    cache = {int(k): v for k, v in cache_raw.items()}
+    if offline:
+        return cache
+
+    to_fetch = [pid for pid in player_ids if pid not in cache] if refresh \
+        else []
+    if to_fetch:
+        if progress:
+            progress(f"Fetching last-season stats for {len(to_fetch)} players "
+                     "(one-off, cached)...")
+        done = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for pid, rec in ex.map(_fetch_one_history, to_fetch):
+                cache[pid] = rec  # rec may be None (no PL history) — remembered
+                done += 1
+                if progress and done % 100 == 0:
+                    progress(f"  ...{done}/{len(to_fetch)}")
+        _save_cache(name, {str(k): v for k, v in cache.items()})
+    # Drop the None sentinels before returning usable stats.
+    return {pid: rec for pid, rec in cache.items() if rec}
 
 
 def _main(argv: list[str] | None = None) -> int:

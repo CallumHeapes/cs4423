@@ -103,6 +103,13 @@ XA90_CAP = 0.70
 ATTACK_BASELINE_C = 0.20   # baseline attacking pts/game ≈ C * £m * pos factor
 ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
 
+# Last season's totals (minutes, xG, xA, clean sheets — from element-summary's
+# history_past) are POOLED with the current season so that pre-season we score
+# on a real sample instead of noise, and the current season takes over as games
+# accrue. Last season is down-weighted (players change), and promoted-club or
+# overseas players with no PL history just fall back to the price baseline.
+LAST_SEASON_WEIGHT = 0.80
+
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}  # GK, DEF, MID, FWD (hard FPL squad rule)
 SQUAD_SIZE = 15
@@ -294,13 +301,37 @@ def _minutes_multiplier(chance: int | None, status: str) -> tuple[float, bool,
     return 0.10, True, flags
 
 
-def _clean_sheet_prob(el: dict, team: dict, avg_def_strength: float) -> float:
-    """Per-game clean-sheet probability for the player's team."""
-    cs90 = _to_float(el.get("clean_sheets_per_90"))
-    if cs90 > 0:  # real in-season signal
+def _effective_rates(el: dict, hist: dict | None
+                     ) -> tuple[float, float, float, float]:
+    """Pool current-season totals with last season into per-90 rates.
+
+    Returns (xg90, xa90, cs90, effective_minutes). Pre-season the current-season
+    totals are ~0 so the rates come from last season; the effective-minutes
+    figure (pooled) drives how much we trust them.
+    """
+    cur_min = _to_float(el.get("minutes"))
+    last_min = hist["minutes"] if hist else 0.0
+    eff_min = cur_min + LAST_SEASON_WEIGHT * last_min
+    if eff_min <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    def pooled(cur_key: str, last_key: str) -> float:
+        cur = _to_float(el.get(cur_key))
+        last = hist[last_key] if hist else 0.0
+        return (cur + LAST_SEASON_WEIGHT * last) / (eff_min / 90.0)
+
+    xg90 = min(pooled("expected_goals", "xg"), XG90_CAP)
+    xa90 = min(pooled("expected_assists", "xa"), XA90_CAP)
+    cs90 = pooled("clean_sheets", "cs")
+    return xg90, xa90, cs90, eff_min
+
+
+def _clean_sheet_prob(el: dict, team: dict, avg_def_strength: float,
+                      cs90: float, eff_min: float) -> float:
+    """Per-game clean-sheet probability, from a real per-90 sample when we have
+    one, else the team's defensive strength, else the league baseline."""
+    if eff_min > 0 and cs90 > 0:
         return _clamp(cs90, *CS_PROB_CLAMP)
-    # Pre-season: infer from team defensive strength vs league average. If the
-    # strengths aren't published yet (all 0), fall back to the league baseline.
     team_def = ((team.get("strength_defence_home") or 0)
                 + (team.get("strength_defence_away") or 0)) / 2
     if not avg_def_strength or not team_def:
@@ -308,13 +339,11 @@ def _clean_sheet_prob(el: dict, team: dict, avg_def_strength: float) -> float:
     return _clamp(CS_BASE_PROB * (team_def / avg_def_strength), *CS_PROB_CLAMP)
 
 
-def _attacking_points(el: dict, pos: int) -> tuple[float, float, bool, bool]:
-    """Per-game expected attacking points from xG/xA, with small-sample
-    shrinkage so pre-season cameo rates can't dominate. Returns
+def _attacking_points(el: dict, pos: int, xg90: float, xa90: float,
+                      eff_min: float) -> tuple[float, float, bool, bool]:
+    """Per-game expected attacking points from pooled xG/xA, with minutes-based
+    shrinkage toward a price/position baseline. Returns
     (attack_pts, effective_xgi90, is_pen_taker, is_setpiece)."""
-    xg90 = min(_to_float(el.get("expected_goals_per_90")), XG90_CAP)
-    xa90 = min(_to_float(el.get("expected_assists_per_90")), XA90_CAP)
-
     is_pen = el.get("penalties_order") == 1
     is_sp = (el.get("direct_freekicks_order") == 1
              or el.get("corners_and_indirect_freekicks_order") == 1)
@@ -324,23 +353,20 @@ def _attacking_points(el: dict, pos: int) -> tuple[float, float, bool, bool]:
         xa90 += SETPIECE_XA_BONUS
 
     raw = xg90 * GOAL_PTS[pos] + xa90 * ASSIST_PTS
-    # Trust the rate in proportion to the minutes behind it; shrink the rest
-    # toward a modest price/position baseline.
-    mins = _to_float(el.get("minutes"))
-    reliability = mins / (mins + MINUTES_ANCHOR) if mins > 0 else 0.0
+    # Trust the rate in proportion to the (pooled) minutes behind it; shrink the
+    # rest toward a modest price/position baseline.
+    reliability = eff_min / (eff_min + MINUTES_ANCHOR) if eff_min > 0 else 0.0
     cost_m = el["now_cost"] / 10.0
     baseline = ATTACK_BASELINE_C * cost_m * ATTACK_POS_FACTOR[pos]
     attack_pts = reliability * raw + (1 - reliability) * baseline
-
-    xgi90 = _to_float(el.get("expected_goal_involvements_per_90")) or (xg90 + xa90)
-    xgi90 = min(xgi90, XG90_CAP + XA90_CAP)  # display sanity
-    return attack_pts, xgi90, is_pen, is_sp
+    return attack_pts, min(xg90 + xa90, XG90_CAP + XA90_CAP), is_pen, is_sp
 
 
-def build_players(bootstrap: dict, fixtures: list[dict], horizon: int
-                  ) -> list[Player]:
+def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
+                  last_season: dict[int, dict] | None = None) -> list[Player]:
     teams = {t["id"]: t for t in bootstrap["teams"]}
     outlook = compute_team_outlook(fixtures, teams, horizon)
+    last_season = last_season or {}
     avg_def_strength = (
         sum((t.get("strength_defence_home", 0) + t.get("strength_defence_away", 0)) / 2
             for t in teams.values()) / max(1, len(teams))
@@ -359,8 +385,10 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int
         chance = el.get("chance_of_playing_next_round")
         minutes_mult, risky, flags = _minutes_multiplier(chance, el.get("status", "a"))
 
-        attack_pts, xgi90, is_pen, is_sp = _attacking_points(el, pos)
-        cs_prob = _clean_sheet_prob(el, team, avg_def_strength)
+        hist = last_season.get(el["id"])
+        xg90, xa90, cs90, eff_min = _effective_rates(el, hist)
+        attack_pts, xgi90, is_pen, is_sp = _attacking_points(el, pos, xg90, xa90, eff_min)
+        cs_prob = _clean_sheet_prob(el, team, avg_def_strength, cs90, eff_min)
         cs_pts = cs_prob * CS_PTS[pos]
 
         cost_m = el["now_cost"] / 10.0
@@ -488,7 +516,7 @@ def _squad_table(players: Iterable[Player]) -> str:
 
 def build_report(squad: list[Player], xi: list[Player], all_players: list[Player],
                  *, budget: int, max_player_cost: int, horizon: int,
-                 min_differentials: int) -> str:
+                 min_differentials: int, n_history: int = 0) -> str:
     xi_ids = {p.id for p in xi}
     bench = [p for p in squad if p.id not in xi_ids]
     bench_gk = [p for p in bench if p.position == 1]
@@ -513,6 +541,9 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
                f"(£{bank/10:.1f}m in the bank)  ")
     out.append(f"**Per-player price cap:** £{max_player_cost/10:.1f}m  ")
     out.append(f"**Opponent horizon:** next {horizon} gameweeks  ")
+    if n_history:
+        out.append(f"**Goals/assists basis:** last season pooled with current "
+                   f"for {n_history} players  ")
     out.append(f"**Starting XI formation:** {_formation(xi)}")
     out.append("")
 
@@ -640,11 +671,21 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
 
 
 def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
-        offline: bool, min_differentials: int) -> str:
+        offline: bool, min_differentials: int, use_history: bool = True) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
-    players = build_players(bootstrap, fixtures, horizon)
+    last_season: dict[int, dict] = {}
+    if use_history:
+        ids = [el["id"] for el in bootstrap["elements"]]
+        last_season = fetch_data.get_last_season_stats(
+            ids, refresh=not offline, offline=offline,
+            progress=lambda m: print(m, file=sys.stderr))
+        if last_season:
+            print(f"Last-season stats loaded for {len(last_season)} players.",
+                  file=sys.stderr)
+
+    players = build_players(bootstrap, fixtures, horizon, last_season)
     budget = int(round(budget_m * 10))
     max_player_cost = int(round(max_player_cost_m * 10))
 
@@ -653,7 +694,8 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
     xi = pick_starting_xi(squad)
     return build_report(squad, xi, players, budget=budget,
                         max_player_cost=max_player_cost, horizon=horizon,
-                        min_differentials=min_differentials)
+                        min_differentials=min_differentials,
+                        n_history=len(last_season))
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -672,12 +714,16 @@ def _main(argv: list[str] | None = None) -> int:
                              "picks into the squad (default 0)")
     parser.add_argument("--offline", action="store_true",
                         help="use the cached ./data snapshot instead of fetching live")
+    parser.add_argument("--no-history", action="store_true",
+                        help="skip the last-season pull (faster; weaker pre-season "
+                             "goals/assists signal)")
     args = parser.parse_args(argv)
 
     try:
         report = run(budget_m=args.budget, max_player_cost_m=args.max_player_cost,
                      horizon=args.horizon, offline=args.offline,
-                     min_differentials=args.differentials)
+                     min_differentials=args.differentials,
+                     use_history=not args.no_history)
     except (RuntimeError, OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

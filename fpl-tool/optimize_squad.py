@@ -110,6 +110,11 @@ ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
 # overseas players with no PL history just fall back to the price baseline.
 LAST_SEASON_WEIGHT = 0.80
 
+# Flag players whose last season had few minutes (known fringe/rotation/backup)
+# so a cheap non-starter — e.g. a #2 keeper — is visible for the eye-test. Only
+# applies to players with PL history; new signings have no history to judge.
+NAILED_FLAG_MINUTES = 1000
+
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}  # GK, DEF, MID, FWD (hard FPL squad rule)
 SQUAD_SIZE = 15
@@ -414,6 +419,8 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
             flags.append("pen taker")
         if is_sp:
             flags.append("set pieces")
+        if hist and hist["minutes"] < NAILED_FLAG_MINUTES:
+            flags.append(f"{int(hist['minutes'])}m last yr")
         if news and not any(news[:20] in f for f in flags):
             flags.append(news if len(news) <= 44 else news[:41] + "...")
 
@@ -523,13 +530,15 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
     bench_out = sorted((p for p in bench if p.position != 1), key=lambda p: -p.score)
     bench_ordered = bench_gk + bench_out
 
-    # Captain: best attacking-threat pick in the XI (goals win games & armbands).
+    # Captain/vice: attacking ceiling only (goals & assists win armbands), and
+    # only midfielders/forwards — you never captain a defender or keeper.
     def _cap_key(p: Player) -> float:
-        return (p.attack_pts * p.attack_ease + p.cs_pts * p.cs_ease) * p.n_fixtures \
-            if (p.attack_pts or p.cs_pts) else p.score
-    captain = max(xi, key=_cap_key)
-    other_club = [p for p in xi if p.team_id != captain.team_id]
-    vice = max(other_club or [p for p in xi if p.id != captain.id], key=_cap_key)
+        return p.attack_pts * p.attack_ease * p.n_fixtures
+    cap_pool = [p for p in xi if p.position in (3, 4)] or xi
+    captain = max(cap_pool, key=_cap_key)
+    other_club = [p for p in cap_pool if p.team_id != captain.team_id]
+    vice = max(other_club or [p for p in cap_pool if p.id != captain.id],
+               key=_cap_key)
 
     total_cost = sum(p.cost for p in squad)
     bank = budget - total_cost

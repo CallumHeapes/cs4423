@@ -67,6 +67,7 @@ ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
 # to the price baseline.
 LAST_SEASON_WEIGHT = 0.80
 USE_HISTORY = True          # set False (or --no-history) to skip the per-player pull
+NAILED_FLAG_MINUTES = 1000  # flag players with few minutes last season (fringe)
 
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}
@@ -284,6 +285,8 @@ def build_players(boot, fixtures, horizon, last_season=None):
             flags.append("pen taker")
         if is_sp:
             flags.append("set pieces")
+        if hist and hist["minutes"] < NAILED_FLAG_MINUTES:
+            flags.append(f"{int(hist['minutes'])}m last yr")
         if news and not any(news[:20] in x for x in flags):
             flags.append(news if len(news) <= 44 else news[:41] + "...")
 
@@ -347,9 +350,8 @@ def table(players):
 
 
 def cap_key(p):
-    if p["attack_pts"] or p["cs_pts"]:
-        return (p["attack_pts"] * p["att_ease"] + p["cs_pts"] * p["cs_ease"]) * p["n_fix"]
-    return p["score"]
+    # attacking ceiling only — you never captain a defender or keeper
+    return p["attack_pts"] * p["att_ease"] * p["n_fix"]
 
 
 def report(squad, xi, allp, budget, max_cost, horizon, min_diff, n_history=0):
@@ -357,9 +359,10 @@ def report(squad, xi, allp, budget, max_cost, horizon, min_diff, n_history=0):
     bench = [p for p in squad if p["id"] not in xi_ids]
     bench = ([p for p in bench if p["pos"] == 1]
              + sorted((p for p in bench if p["pos"] != 1), key=lambda p: -p["score"]))
-    cap = max(xi, key=cap_key)
-    others = [p for p in xi if p["team_id"] != cap["team_id"]] or \
-             [p for p in xi if p["id"] != cap["id"]]
+    cap_pool = [p for p in xi if p["pos"] in (3, 4)] or xi
+    cap = max(cap_pool, key=cap_key)
+    others = [p for p in cap_pool if p["team_id"] != cap["team_id"]] or \
+             [p for p in cap_pool if p["id"] != cap["id"]]
     vice = max(others, key=cap_key)
     total = sum(p["cost"] for p in squad)
     prem = sorted((p for p in squad if p["cost"] >= 80), key=lambda p: -p["cost"])

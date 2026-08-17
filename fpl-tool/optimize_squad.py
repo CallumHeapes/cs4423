@@ -900,6 +900,10 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         max_bank=int(round(max_bank_m * 10)),
         min_premiums=min_premiums, premium_cost=int(round(premium_cost_m * 10)),
         bench_gk_max=int(round(bench_gk_max_m * 10)))
+    try:  # remember the proposed 15 for benchmark.py (best-effort)
+        fetch_data.save_squad([p.id for p in squad])
+    except OSError:
+        pass
     xi = pick_starting_xi(squad)
     return build_report(squad, xi, players, budget=budget,
                         max_player_cost=max_player_cost, horizon=horizon,

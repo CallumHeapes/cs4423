@@ -140,6 +140,26 @@ manual switchover.
 > The public API can't reliably report your free-transfer count, so pass
 > `--free-transfers N` (default 1).
 
+## Benchmark — vs the field & elite managers
+
+```bash
+python benchmark.py            # your squad vs the top 50 managers
+python benchmark.py --top 100  # vs the top 100
+```
+
+FPL is a rank game, so `benchmark.py` compares your squad to what the best
+managers actually own. It pulls the top N managers from the global league
+(id 314), aggregates their **elite ownership**, and reports:
+
+- what the elite own (a sharper signal than overall ownership) and their captain;
+- your **template holes** — heavily elite-owned players you're missing (rank risk);
+- your **differentials** — players you own that the elite mostly don't (your swing).
+
+In-season it uses your live team + elite managers' real picks. Pre-season (before
+GW1 locks) elite picks don't exist, so it compares the **proposed squad** that
+`optimize_squad.py` saved to overall ownership — run the optimizer first in the
+same session.
+
 ## One-tap Colab notebook
 
 `FPL_Corrib_Athletic.ipynb` — open it in [Google Colab](https://colab.research.google.com)

@@ -76,13 +76,14 @@ def _save_cache(name: str, payload: Any) -> None:
         json.dump(payload, fh)
 
 
-def _get_json(endpoint: str, *, retries: int = 3, timeout: int = 30) -> Any:
+def _get_json(endpoint: str, *, params: dict | None = None, retries: int = 3,
+              timeout: int = 30) -> Any:
     """GET {BASE_URL}/{endpoint}/ with a short exponential backoff on failure."""
     url = f"{BASE_URL}/{endpoint}/"
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=timeout)
+            resp = requests.get(url, headers=HEADERS, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as exc:  # network / HTTP error
@@ -168,6 +169,46 @@ def get_entry_history(team_id: int | None = None) -> dict:
     return _get_json(f"entry/{team_id}/history")
 
 
+OVERALL_LEAGUE_ID = 314  # the classic league every FPL manager is in
+
+
+def get_top_manager_ids(n: int = 50, league_id: int = OVERALL_LEAGUE_ID
+                        ) -> list[int]:
+    """Entry ids of the top `n` managers in a classic league (default: overall).
+    Standings paginate 50 per page."""
+    ids: list[int] = []
+    page = 1
+    while len(ids) < n:
+        data = _get_json(f"leagues-classic/{league_id}/standings",
+                         params={"page_standings": page})
+        standings = data.get("standings", {})
+        results = standings.get("results", [])
+        if not results:
+            break
+        ids.extend(r["entry"] for r in results)
+        if not standings.get("has_next"):
+            break
+        page += 1
+    return ids[:n]
+
+
+def get_manager_picks_bulk(manager_ids, gw: int, workers: int = 8
+                           ) -> dict[int, dict]:
+    """{entry_id: picks_payload} for many managers at a gameweek, threaded.
+    Failures are skipped."""
+    def _one(mid):
+        try:
+            return mid, get_entry_picks(gw, mid)
+        except RuntimeError:
+            return mid, None
+    out: dict[int, dict] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for mid, picks in ex.map(_one, manager_ids):
+            if picks:
+                out[mid] = picks
+    return out
+
+
 def current_and_next_gw(bootstrap: dict) -> tuple[int | None, int | None]:
     """From bootstrap events, the current (last locked) and next gameweek ids."""
     current = next_gw = None
@@ -186,6 +227,19 @@ def current_and_next_gw(bootstrap: dict) -> tuple[int | None, int | None]:
 def get_element_summary(player_id: int) -> dict:
     """Per-player gameweek history + upcoming fixtures (used sparingly)."""
     return _get_json(f"element-summary/{player_id}")
+
+
+def save_squad(player_ids, team_id: int | None = None) -> None:
+    """Remember a proposed 15 (from the optimizer) so benchmark.py can compare
+    it before the season starts and your real team exists."""
+    team_id = team_id or default_team_id()
+    _save_cache(f"squad_{team_id}", {"ids": [int(i) for i in player_ids]})
+
+
+def load_squad(team_id: int | None = None) -> list[int] | None:
+    team_id = team_id or default_team_id()
+    data = _load_cache(f"squad_{team_id}")
+    return data.get("ids") if data else None
 
 
 CLUBELO_URL = "https://api.clubelo.com"

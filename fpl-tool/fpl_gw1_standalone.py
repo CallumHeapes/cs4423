@@ -170,6 +170,22 @@ def get_club_elo():
     return out
 
 
+def resolve_team_tokens(tokens, teams):
+    if not tokens:
+        return set()
+    norm = lambda s: re.sub(r"[^a-z ]", "", s.lower()).strip()
+    short = {t["short_name"].upper(): t["id"] for t in teams}
+    names = {norm(t["name"]): t["id"] for t in teams}
+    out = set()
+    for tok in tokens:
+        tid = short.get(tok.upper()) or names.get(norm(tok))
+        if tid is None:
+            print(f"--fade: '{tok}' didn't match any club (use a short name like CRY).")
+        else:
+            out.add(tid)
+    return out
+
+
 def map_elo_to_teams(elo_by_name, teams):
     norm = lambda s: re.sub(r"[^a-z ]", "", s.lower()).strip()
     short_to_id = {t["short_name"]: t["id"] for t in teams}
@@ -337,7 +353,8 @@ def attacking_points(el, pos, xg, xa, eff_min):
     return attack, min(xg + xa, XG90_CAP + XA90_CAP), is_pen, is_sp
 
 
-def build_players(boot, fixtures, horizon, last_season=None, elo_by_team=None):
+def build_players(boot, fixtures, horizon, last_season=None, elo_by_team=None,
+                  fade_team_ids=None, fade_strength=1.0):
     teams = {t["id"]: t for t in boot["teams"]}
     outlook, avg_def = team_outlook(fixtures, teams, horizon)
     last_season = last_season or {}
@@ -348,6 +365,7 @@ def build_players(boot, fixtures, horizon, last_season=None, elo_by_team=None):
     avg_elo = sum(elo_by_team.values()) / len(elo_by_team) if elo_by_team else 0.0
     elo_mult = {tid: _clamp(e / avg_elo, *TEAM_ATT_CLAMP)
                 for tid, e in elo_by_team.items()} if avg_elo else {}
+    fade_team_ids = fade_team_ids or set()
     players = []
     for el in boot["elements"]:
         pos = el["element_type"]
@@ -378,6 +396,9 @@ def build_players(boot, fixtures, horizon, last_season=None, elo_by_team=None):
         per_game = (generic * gen_ease + W_ATTACK * attack_pts * att_ease
                     + W_CS * cs_pts * cs_ease + saves)
         score = per_game * mult * n_fix * nailed_factor(hist)
+        faded = el["team"] in fade_team_ids
+        if faded:
+            score *= fade_strength
 
         own = _f(el.get("selected_by_percent"))
         news = (el.get("news") or "").strip()
@@ -385,6 +406,8 @@ def build_players(boot, fixtures, horizon, last_season=None, elo_by_team=None):
             flags.append("pen taker")
         if is_sp:
             flags.append("set pieces")
+        if faded:
+            flags.append(f"faded ×{fade_strength:.2f}")
         if pos in (3, 4) and tam <= TEAM_WEAK_FLAG:
             flags.append("weak team attack")
         if hist and hist["minutes"] < NAILED_FLAG_MINUTES:
@@ -575,6 +598,10 @@ def main():
                     help="skip the last-season pull (faster, weaker pre-season signal)")
     ap.add_argument("--no-elo", action="store_true",
                     help="skip the ClubElo team-strength pull")
+    ap.add_argument("--fade", nargs="+", metavar="CLUB", default=None,
+                    help="downweight clubs you're bearish on, e.g. --fade CRY BUR")
+    ap.add_argument("--fade-strength", type=float, default=0.70,
+                    help="score multiplier for faded clubs (default 0.70)")
     args, _ = ap.parse_known_args()  # ignore Colab/Jupyter's own argv
 
     print("Fetching live FPL data ...")
@@ -591,7 +618,13 @@ def main():
         if elo_by_team:
             print(f"ClubElo ratings loaded for {len(elo_by_team)} clubs.")
 
-    players = build_players(boot, fixtures, args.horizon, last_season, elo_by_team)
+    fade_ids = resolve_team_tokens(args.fade, boot["teams"])
+    if fade_ids:
+        faded = ", ".join(sorted(t["short_name"] for t in boot["teams"] if t["id"] in fade_ids))
+        print(f"Fading {faded} by x{args.fade_strength:.2f}.")
+
+    players = build_players(boot, fixtures, args.horizon, last_season, elo_by_team,
+                            fade_ids, args.fade_strength)
     budget = int(round(args.budget * 10))
     max_cost = int(round(args.max_player_cost * 10))
     squad = solve_squad(players, budget, max_cost, args.differentials,

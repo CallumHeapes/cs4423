@@ -113,6 +113,24 @@ def _norm_name(s: str) -> str:
     return re.sub(r"[^a-z ]", "", s.lower()).strip()
 
 
+def resolve_team_tokens(tokens, teams: list[dict]) -> set[int]:
+    """Resolve CLI team tokens (short names like 'CRY', or full names) to FPL
+    team ids. Case-insensitive; unmatched tokens are ignored with a warning."""
+    if not tokens:
+        return set()
+    short = {t["short_name"].upper(): t["id"] for t in teams}
+    names = {_norm_name(t["name"]): t["id"] for t in teams}
+    out: set[int] = set()
+    for tok in tokens:
+        tid = short.get(tok.upper()) or names.get(_norm_name(tok))
+        if tid is None:
+            print(f"--fade: '{tok}' didn't match any club (use a short name like "
+                  "CRY).", file=sys.stderr)
+        else:
+            out.add(tid)
+    return out
+
+
 def map_elo_to_teams(elo_by_name: dict[str, float], teams: list[dict]
                      ) -> dict[int, float]:
     """Map ClubElo {club_name: elo} onto FPL {team_id: elo}."""
@@ -462,7 +480,9 @@ def _attacking_points(el: dict, pos: int, xg90: float, xa90: float,
 def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
                   last_season: dict[int, dict] | None = None,
                   last_season_weight: float = LAST_SEASON_WEIGHT,
-                  elo_by_team: dict[int, float] | None = None) -> list[Player]:
+                  elo_by_team: dict[int, float] | None = None,
+                  fade_team_ids: set[int] | None = None,
+                  fade_strength: float = 1.0) -> list[Player]:
     teams = {t["id"]: t for t in bootstrap["teams"]}
     outlook = compute_team_outlook(fixtures, teams, horizon)
     last_season = last_season or {}
@@ -480,6 +500,7 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
     avg_elo = sum(elo_by_team.values()) / len(elo_by_team) if elo_by_team else 0.0
     elo_mult = {tid: _clamp(e / avg_elo, *TEAM_ATT_CLAMP)
                 for tid, e in elo_by_team.items()} if avg_elo else {}
+    fade_team_ids = fade_team_ids or set()
 
     players: list[Player] = []
     for el in bootstrap["elements"]:
@@ -524,6 +545,9 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
                     + W_CS * cs_pts * cs_ease
                     + saves_pts)
         score = per_game * minutes_mult * n_fix * _nailed_factor(el, hist)
+        faded = el["team"] in fade_team_ids
+        if faded:
+            score *= fade_strength
 
         selected_by = _to_float(el.get("selected_by_percent"))
         news = (el.get("news") or "").strip()
@@ -531,6 +555,8 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
             flags.append("pen taker")
         if is_sp:
             flags.append("set pieces")
+        if faded:
+            flags.append(f"faded ×{fade_strength:.2f}")
         if pos in (3, 4) and team_att_mult <= TEAM_WEAK_FLAG:
             flags.append("weak team attack")
         if hist and hist["minutes"] < NAILED_FLAG_MINUTES:
@@ -830,7 +856,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         min_bank_m: float = 2.0, max_bank_m: float = 5.0,
         min_premiums: int = 2, premium_cost_m: float = 9.0,
         bench_gk_max_m: float = 4.5, max_per_club: int = 3,
-        use_elo: bool = True) -> str:
+        use_elo: bool = True, fade=None, fade_strength: float = 0.70) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
@@ -855,8 +881,15 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
             print(f"ClubElo fetched {len(elo_names)} clubs but none mapped to FPL "
                   "teams — check name aliases.", file=sys.stderr)
 
+    fade_ids = resolve_team_tokens(fade, bootstrap["teams"])
+    if fade_ids:
+        faded = ", ".join(sorted(t["short_name"] for t in bootstrap["teams"]
+                                 if t["id"] in fade_ids))
+        print(f"Fading {faded} by ×{fade_strength:.2f}.", file=sys.stderr)
+
     players = build_players(bootstrap, fixtures, horizon, last_season,
-                            elo_by_team=elo_by_team)
+                            elo_by_team=elo_by_team, fade_team_ids=fade_ids,
+                            fade_strength=fade_strength)
     budget = int(round(budget_m * 10))
     max_player_cost = int(round(max_player_cost_m * 10))
 
@@ -912,6 +945,12 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-elo", action="store_true",
                         help="skip the ClubElo team-strength pull (falls back to "
                              "FPL's own ratings)")
+    parser.add_argument("--fade", nargs="+", metavar="CLUB", default=None,
+                        help="downweight specific clubs you're bearish on, e.g. "
+                             "--fade CRY BUR (use FPL short names)")
+    parser.add_argument("--fade-strength", type=float, default=0.70,
+                        help="score multiplier applied to faded clubs (default "
+                             "0.70 = a 30%% haircut)")
     args = parser.parse_args(argv)
 
     try:
@@ -921,7 +960,8 @@ def _main(argv: list[str] | None = None) -> int:
                      use_history=not args.no_history, use_elo=not args.no_elo,
                      min_bank_m=args.min_bank, max_bank_m=args.max_bank,
                      min_premiums=args.min_premiums, premium_cost_m=args.premium_cost,
-                     bench_gk_max_m=args.bench_gk_max, max_per_club=args.max_per_club)
+                     bench_gk_max_m=args.bench_gk_max, max_per_club=args.max_per_club,
+                     fade=args.fade, fade_strength=args.fade_strength)
     except (RuntimeError, OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

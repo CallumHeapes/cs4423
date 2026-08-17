@@ -43,7 +43,11 @@ Squad-shape levers (all have sensible defaults):
 | `--premium-cost` | 9.0 | price (£m) that counts as an attacking premium |
 | `--bench-gk-max` | 4.5 | force a cheap bench keeper so no budget is wasted on a non-playing #2 |
 | `--max-player-cost` | 13.0 | per-player cap (bars £14m+ superstars) |
+| `--max-per-club` | 3 | max players from one club (set 2 for more spread) |
 | `--differentials` | 0 | force ≥N sub-10%-owned picks |
+| `--fade CLUB…` | — | downweight clubs you're bearish on, e.g. `--fade CRY BUR` |
+| `--fade-strength` | 0.70 | score multiplier for faded clubs (0.70 = −30%) |
+| `--no-elo` | off | skip the ClubElo pull (fall back to FPL/neutral strength) |
 
 What it does:
 

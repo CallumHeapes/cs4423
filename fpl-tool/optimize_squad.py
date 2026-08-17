@@ -91,6 +91,18 @@ FIX_SENSITIVITY = 0.15     # FDR-based general multiplier sensitivity
 # A pick is a "differential" below this effective-ownership %.
 DIFF_OWNERSHIP = 10.0
 
+# Minutes-based reliability. Per-90 rates from tiny samples (pre-season cameos,
+# bit-part players) are noise — a bit-part player with one goal involvement in a
+# 200' cameo shows a wild per-90. Trust the rate in proportion to the minutes
+# behind it (≈50% trust at MINUTES_ANCHOR minutes) and shrink the rest toward a
+# modest price/position baseline. Also clamp per-90 to realistic ceilings so no
+# freak cameo can dominate even before shrinkage.
+MINUTES_ANCHOR = 900       # ~10 full matches for ~50% trust
+XG90_CAP = 1.10            # elite ~0.7; leaves headroom
+XA90_CAP = 0.70
+ATTACK_BASELINE_C = 0.20   # baseline attacking pts/game ≈ C * £m * pos factor
+ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
+
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}  # GK, DEF, MID, FWD (hard FPL squad rule)
 SQUAD_SIZE = 15
@@ -297,10 +309,11 @@ def _clean_sheet_prob(el: dict, team: dict, avg_def_strength: float) -> float:
 
 
 def _attacking_points(el: dict, pos: int) -> tuple[float, float, bool, bool]:
-    """Per-game expected attacking points from xG/xA. Returns
-    (attack_pts, xgi90, is_pen_taker, is_setpiece)."""
-    xg90 = _to_float(el.get("expected_goals_per_90"))
-    xa90 = _to_float(el.get("expected_assists_per_90"))
+    """Per-game expected attacking points from xG/xA, with small-sample
+    shrinkage so pre-season cameo rates can't dominate. Returns
+    (attack_pts, effective_xgi90, is_pen_taker, is_setpiece)."""
+    xg90 = min(_to_float(el.get("expected_goals_per_90")), XG90_CAP)
+    xa90 = min(_to_float(el.get("expected_assists_per_90")), XA90_CAP)
 
     is_pen = el.get("penalties_order") == 1
     is_sp = (el.get("direct_freekicks_order") == 1
@@ -310,10 +323,17 @@ def _attacking_points(el: dict, pos: int) -> tuple[float, float, bool, bool]:
     if is_sp:
         xa90 += SETPIECE_XA_BONUS
 
-    attack_pts = xg90 * GOAL_PTS[pos] + xa90 * ASSIST_PTS
-    xgi90 = _to_float(el.get("expected_goal_involvements_per_90"))
-    if xgi90 == 0:
-        xgi90 = xg90 + xa90
+    raw = xg90 * GOAL_PTS[pos] + xa90 * ASSIST_PTS
+    # Trust the rate in proportion to the minutes behind it; shrink the rest
+    # toward a modest price/position baseline.
+    mins = _to_float(el.get("minutes"))
+    reliability = mins / (mins + MINUTES_ANCHOR) if mins > 0 else 0.0
+    cost_m = el["now_cost"] / 10.0
+    baseline = ATTACK_BASELINE_C * cost_m * ATTACK_POS_FACTOR[pos]
+    attack_pts = reliability * raw + (1 - reliability) * baseline
+
+    xgi90 = _to_float(el.get("expected_goal_involvements_per_90")) or (xg90 + xa90)
+    xgi90 = min(xgi90, XG90_CAP + XA90_CAP)  # display sanity
     return attack_pts, xgi90, is_pen, is_sp
 
 

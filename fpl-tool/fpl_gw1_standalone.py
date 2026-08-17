@@ -54,6 +54,13 @@ EASE_CLAMP = (0.70, 1.30)
 FIX_SENSITIVITY = 0.15
 DIFF_OWNERSHIP = 10.0
 
+# Minutes-based reliability: shrink small-sample per-90 rates (pre-season cameos)
+# toward a modest price/position baseline, and clamp per-90 to realistic ceilings.
+MINUTES_ANCHOR = 900
+XG90_CAP, XA90_CAP = 1.10, 0.70
+ATTACK_BASELINE_C = 0.20
+ATTACK_POS_FACTOR = {1: 0.0, 2: 0.30, 3: 0.80, 4: 1.0}
+
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 SQUAD_QUOTA = {1: 2, 2: 5, 3: 5, 4: 3}
 XI_BOUNDS = {1: (1, 1), 2: (3, 4), 3: (3, 5), 4: (2, 3)}  # never 5 DEF
@@ -173,8 +180,8 @@ def clean_sheet_prob(el, team, avg_def):
 
 
 def attacking_points(el, pos):
-    xg = _f(el.get("expected_goals_per_90"))
-    xa = _f(el.get("expected_assists_per_90"))
+    xg = min(_f(el.get("expected_goals_per_90")), XG90_CAP)
+    xa = min(_f(el.get("expected_assists_per_90")), XA90_CAP)
     is_pen = el.get("penalties_order") == 1
     is_sp = (el.get("direct_freekicks_order") == 1
              or el.get("corners_and_indirect_freekicks_order") == 1)
@@ -182,8 +189,14 @@ def attacking_points(el, pos):
         xg += PEN_XG_BONUS
     if is_sp:
         xa += SETPIECE_XA_BONUS
-    xgi = _f(el.get("expected_goal_involvements_per_90")) or (xg + xa)
-    return xg * GOAL_PTS[pos] + xa * ASSIST_PTS, xgi, is_pen, is_sp
+    raw = xg * GOAL_PTS[pos] + xa * ASSIST_PTS
+    # minutes reliability shrinkage toward a modest price/position baseline
+    mins = _f(el.get("minutes"))
+    rel = mins / (mins + MINUTES_ANCHOR) if mins > 0 else 0.0
+    baseline = ATTACK_BASELINE_C * (el["now_cost"] / 10.0) * ATTACK_POS_FACTOR[pos]
+    attack = rel * raw + (1 - rel) * baseline
+    xgi = min(_f(el.get("expected_goal_involvements_per_90")) or (xg + xa), XG90_CAP + XA90_CAP)
+    return attack, xgi, is_pen, is_sp
 
 
 def build_players(boot, fixtures, horizon):

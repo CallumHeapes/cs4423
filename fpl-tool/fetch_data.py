@@ -207,12 +207,21 @@ def get_club_elo(*, refresh: bool = True, offline: bool = False,
         if cached is not None:
             return cached
     date = on_date or datetime.date.today().isoformat()
-    try:
-        resp = requests.get(f"{CLUBELO_URL}/{date}", headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        text = resp.text
-    except requests.RequestException:
-        return _load_cache(name) or {}  # keep going without Elo
+    ua = {"User-Agent": HEADERS["User-Agent"]}  # no JSON Accept — it returns CSV
+    text, errors = None, []
+    for scheme in ("https", "http"):  # ClubElo is http-first; try both
+        try:
+            resp = requests.get(f"{scheme}://api.clubelo.com/{date}", headers=ua,
+                                timeout=30)
+            resp.raise_for_status()
+            text = resp.text
+            break
+        except requests.RequestException as exc:
+            errors.append(f"{scheme}: {exc}")
+    if text is None:
+        print(f"ClubElo unavailable ({' | '.join(errors)}) — falling back to "
+              "FPL/neutral team strength.", file=sys.stderr)
+        return _load_cache(name) or {}
     out: dict[str, float] = {}
     for row in csv.DictReader(io.StringIO(text)):
         club, elo = row.get("Club"), row.get("Elo")
@@ -223,6 +232,10 @@ def get_club_elo(*, refresh: bool = True, offline: bool = False,
                 pass
     if out:
         _save_cache(name, out)
+    else:
+        print(f"ClubElo returned no parseable rows for {date} "
+              f"({len(text)} bytes). Columns seen: {text.splitlines()[:1]}",
+              file=sys.stderr)
     return out
 
 

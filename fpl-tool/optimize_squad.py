@@ -851,6 +851,9 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         if elo_by_team:
             print(f"ClubElo team ratings loaded for {len(elo_by_team)} clubs.",
                   file=sys.stderr)
+        elif elo_names:
+            print(f"ClubElo fetched {len(elo_names)} clubs but none mapped to FPL "
+                  "teams — check name aliases.", file=sys.stderr)
 
     players = build_players(bootstrap, fixtures, horizon, last_season,
                             elo_by_team=elo_by_team)

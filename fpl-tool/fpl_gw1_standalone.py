@@ -144,19 +144,29 @@ def _fetch_one_history(pid):
 def get_club_elo():
     """ClubElo team ratings {club_name: elo}; {} if unreachable (graceful)."""
     date = datetime.date.today().isoformat()
-    try:
-        resp = requests.get(f"{CLUBELO_URL}/{date}", headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException:
+    ua = {"User-Agent": HEADERS["User-Agent"]}  # returns CSV, not JSON
+    text, errors = None, []
+    for scheme in ("https", "http"):  # ClubElo is http-first; try both
+        try:
+            resp = requests.get(f"{scheme}://api.clubelo.com/{date}", headers=ua, timeout=30)
+            resp.raise_for_status()
+            text = resp.text
+            break
+        except requests.RequestException as exc:
+            errors.append(f"{scheme}: {exc}")
+    if text is None:
+        print(f"ClubElo unavailable ({' | '.join(errors)}) — using FPL/neutral team strength.")
         return {}
     out = {}
-    for row in csv.DictReader(io.StringIO(resp.text)):
+    for row in csv.DictReader(io.StringIO(text)):
         club, elo = row.get("Club"), row.get("Elo")
         if club and elo:
             try:
                 out[club] = float(elo)
             except ValueError:
                 pass
+    if not out:
+        print(f"ClubElo returned no rows for {date}; first line: {text.splitlines()[:1]}")
     return out
 
 

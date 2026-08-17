@@ -37,6 +37,11 @@ MAX_PLAYER_COST_M = 13.0    # per-player cap: lets £11-12m premiums anchor,
                             # bars the £14m+ superstars (Haaland/Salah)
 HORIZON = 5                 # opponent look-ahead in gameweeks (try 6)
 MIN_DIFFERENTIALS = 0       # force >= N sub-10%-owned picks into the squad
+MIN_BANK_M = 2.0            # keep at least this much £m unspent
+MAX_BANK_M = 5.0            # don't leave more than this much £m unspent
+MIN_PREMIUMS = 2            # require >= N attacking (MID/FWD) picks at PREMIUM_COST_M+
+PREMIUM_COST_M = 9.0        # price that counts as an attacking premium
+BENCH_GK_MAX_M = 4.5        # require a cheap bench keeper at/below this £m
 
 # FPL scoring
 GOAL_PTS = {1: 6, 2: 6, 3: 5, 4: 4}
@@ -315,7 +320,9 @@ def build_players(boot, fixtures, horizon, last_season=None):
     return players
 
 
-def solve_squad(players, budget, max_cost, min_diff=0, max_per_club=3):
+def solve_squad(players, budget, max_cost, min_diff=0, max_per_club=3,
+                min_bank=0, max_bank=None, min_premiums=0, premium_cost=90,
+                bench_gk_max=None):
     pool = [p for p in players if p["cost"] <= max_cost and p["score"] > 0]
     prob = pulp.LpProblem("squad", pulp.LpMaximize)
     pick = {p["id"]: pulp.LpVariable(f"p{p['id']}", cat="Binary") for p in pool}
@@ -324,13 +331,23 @@ def solve_squad(players, budget, max_cost, min_diff=0, max_per_club=3):
     prob += pulp.lpSum(pick.values()) == 15
     for pos, q in SQUAD_QUOTA.items():
         prob += pulp.lpSum(pick[p["id"]] for p in pool if p["pos"] == pos) == q
-    prob += pulp.lpSum(p["cost"] * pick[p["id"]] for p in pool) <= budget
+    total = pulp.lpSum(p["cost"] * pick[p["id"]] for p in pool)
+    prob += total <= budget - min_bank
+    if max_bank is not None:
+        prob += total >= budget - max_bank
     for club in {p["team_id"] for p in pool}:
         prob += pulp.lpSum(pick[p["id"]] for p in pool if p["team_id"] == club) <= max_per_club
     if min_diff > 0:
         prob += pulp.lpSum(pick[p["id"]] for p in pool if p["diff"]) >= min_diff
+    if min_premiums > 0:
+        prob += pulp.lpSum(pick[p["id"]] for p in pool
+                           if p["cost"] >= premium_cost and p["pos"] in (3, 4)) >= min_premiums
+    if bench_gk_max is not None:
+        prob += pulp.lpSum(pick[p["id"]] for p in pool
+                           if p["pos"] == 1 and p["cost"] <= bench_gk_max) >= 1
     if pulp.LpStatus[prob.solve(pulp.PULP_CBC_CMD(msg=0))] != "Optimal":
-        raise RuntimeError("No optimal squad — relax cap, budget, or differentials.")
+        raise RuntimeError("No optimal squad — relax the cap, bank range, "
+                           "premiums, or differentials.")
     return [by_id[i] for i, v in pick.items() if v.value() > 0.5]
 
 
@@ -439,6 +456,11 @@ def report(squad, xi, allp, budget, max_cost, horizon, min_diff, n_history=0):
             "— " + ", ".join(f"{p['name']} (£{p['cost']/10:.1f}m)" for p in prem[:4])
             + f" — not one talisman. Priciest **{top['name']} "
             f"(£{top['cost']/10:.1f}m)**, under the £{max_cost/10:.1f}m cap.", "",
+            f"By design: **£{(budget-total)/10:.1f}m held in reserve**, a cheap "
+            f"**£{min(p['cost'] for p in squad if p['pos']==1)/10:.1f}m bench "
+            "keeper** (no budget wasted on a non-playing #2), and "
+            f"**{sum(1 for p in squad if p['cost']>=90 and p['pos'] in (3,4))} "
+            "attacking premium(s) (£9.0m+)** for ceiling.", "",
             "## Transfer rules (season heads-up)\n",
             "- **GW1 is a free build** — unlimited transfers until the Fri 18:30 "
             "BST deadline; re-run right before to lock in late prices/news.",
@@ -456,6 +478,11 @@ def main():
     ap.add_argument("--max-player-cost", type=float, default=MAX_PLAYER_COST_M)
     ap.add_argument("--horizon", type=int, default=HORIZON)
     ap.add_argument("--differentials", type=int, default=MIN_DIFFERENTIALS)
+    ap.add_argument("--min-bank", type=float, default=MIN_BANK_M)
+    ap.add_argument("--max-bank", type=float, default=MAX_BANK_M)
+    ap.add_argument("--min-premiums", type=int, default=MIN_PREMIUMS)
+    ap.add_argument("--premium-cost", type=float, default=PREMIUM_COST_M)
+    ap.add_argument("--bench-gk-max", type=float, default=BENCH_GK_MAX_M)
     ap.add_argument("--no-history", action="store_true",
                     help="skip the last-season pull (faster, weaker pre-season signal)")
     args, _ = ap.parse_known_args()  # ignore Colab/Jupyter's own argv
@@ -471,7 +498,12 @@ def main():
     players = build_players(boot, fixtures, args.horizon, last_season)
     budget = int(round(args.budget * 10))
     max_cost = int(round(args.max_player_cost * 10))
-    squad = solve_squad(players, budget, max_cost, args.differentials)
+    squad = solve_squad(players, budget, max_cost, args.differentials,
+                        min_bank=int(round(args.min_bank * 10)),
+                        max_bank=int(round(args.max_bank * 10)),
+                        min_premiums=args.min_premiums,
+                        premium_cost=int(round(args.premium_cost * 10)),
+                        bench_gk_max=int(round(args.bench_gk_max * 10)))
     xi = solve_xi(squad)
     print("\n" + report(squad, xi, players, budget, max_cost, args.horizon,
                         args.differentials, len(last_season)))

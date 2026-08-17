@@ -474,9 +474,18 @@ class OptimizationError(RuntimeError):
 
 
 def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
-                   max_per_club: int = 3, min_differentials: int = 0
-                   ) -> list[Player]:
-    """Select the 15 that maximise total score under all FPL constraints."""
+                   max_per_club: int = 3, min_differentials: int = 0,
+                   min_bank: int = 0, max_bank: int | None = None,
+                   min_premiums: int = 0, premium_cost: int = 90,
+                   bench_gk_max: int | None = None) -> list[Player]:
+    """Select the 15 that maximise total score under all FPL constraints.
+
+    Extra levers (all in tenths of a million):
+      min_bank / max_bank : keep between min_bank and max_bank unspent.
+      min_premiums        : require >= N attacking (MID/FWD) picks >= premium_cost.
+      bench_gk_max         : require >= 1 cheap keeper (<= bench_gk_max) for the
+                             bench, so budget isn't wasted on a non-playing #2.
+    """
     pool = [p for p in players if p.cost <= max_player_cost and p.score > 0]
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
@@ -487,17 +496,29 @@ def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
     prob += pulp.lpSum(pick.values()) == SQUAD_SIZE
     for pos, quota in SQUAD_QUOTA.items():
         prob += pulp.lpSum(pick[p.id] for p in pool if p.position == pos) == quota
-    prob += pulp.lpSum(p.cost * pick[p.id] for p in pool) <= budget
+
+    total_cost = pulp.lpSum(p.cost * pick[p.id] for p in pool)
+    prob += total_cost <= budget - min_bank        # keep at least min_bank
+    if max_bank is not None:
+        prob += total_cost >= budget - max_bank    # don't hoard more than max_bank
+
     for club in {p.team_id for p in pool}:
         prob += pulp.lpSum(pick[p.id] for p in pool if p.team_id == club) <= max_per_club
     if min_differentials > 0:
         prob += pulp.lpSum(pick[p.id] for p in pool if p.differential) >= min_differentials
+    if min_premiums > 0:
+        prob += pulp.lpSum(pick[p.id] for p in pool
+                           if p.cost >= premium_cost and p.position in (3, 4)) >= min_premiums
+    if bench_gk_max is not None:
+        prob += pulp.lpSum(pick[p.id] for p in pool
+                           if p.position == 1 and p.cost <= bench_gk_max) >= 1
 
     status = prob.solve(pulp.PULP_CBC_CMD(msg=0))
     if pulp.LpStatus[status] != "Optimal":
         raise OptimizationError(
-            f"Solver returned '{pulp.LpStatus[status]}'. Try relaxing "
-            "--max-player-cost, --budget, or --differentials.")
+            f"Solver returned '{pulp.LpStatus[status]}' — the constraints can't "
+            "all be met. Try relaxing --min-premiums, the bank range, or "
+            "--max-player-cost.")
 
     return [by_id[pid] for pid, var in pick.items() if var.value() > 0.5]
 
@@ -665,6 +686,15 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
         f"(£8.0m+)** — {prem_desc} — rather than one £15m+ talisman. Priciest "
         f"pick **{most_expensive.name} (£{most_expensive.cost_m:.1f}m)**, held at "
         f"or under the £{max_player_cost/10:.1f}m cap.")
+    # Reserve / bench-keeper note.
+    bench_gk = min((p for p in squad if p.position == 1), key=lambda p: p.cost)
+    n_prem_att = sum(1 for p in squad if p.cost >= 90 and p.position in (3, 4))
+    out.append("")
+    out.append(f"By design: **£{bank/10:.1f}m held in reserve** (flexibility for "
+               f"an early transfer), a cheap **£{bench_gk.cost_m:.1f}m bench "
+               f"keeper ({bench_gk.name})** so no budget is wasted on a "
+               f"non-playing #2, and **{n_prem_att} attacking premium(s) "
+               "(£9.0m+)** for ceiling.")
     n_risky = sum(1 for p in squad if p.risky)
     out.append("")
     if n_risky == 0:
@@ -705,7 +735,10 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
 
 
 def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
-        offline: bool, min_differentials: int, use_history: bool = True) -> str:
+        offline: bool, min_differentials: int, use_history: bool = True,
+        min_bank_m: float = 2.0, max_bank_m: float = 5.0,
+        min_premiums: int = 2, premium_cost_m: float = 9.0,
+        bench_gk_max_m: float = 4.5) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
@@ -723,8 +756,13 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
     budget = int(round(budget_m * 10))
     max_player_cost = int(round(max_player_cost_m * 10))
 
-    squad = optimize_squad(players, budget=budget, max_player_cost=max_player_cost,
-                           min_differentials=min_differentials)
+    squad = optimize_squad(
+        players, budget=budget, max_player_cost=max_player_cost,
+        min_differentials=min_differentials,
+        min_bank=int(round(min_bank_m * 10)),
+        max_bank=int(round(max_bank_m * 10)),
+        min_premiums=min_premiums, premium_cost=int(round(premium_cost_m * 10)),
+        bench_gk_max=int(round(bench_gk_max_m * 10)))
     xi = pick_starting_xi(squad)
     return build_report(squad, xi, players, budget=budget,
                         max_player_cost=max_player_cost, horizon=horizon,
@@ -746,6 +784,19 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--differentials", type=int, default=0,
                         help=f"force at least N sub-{DIFF_OWNERSHIP:.0f}%%-owned "
                              "picks into the squad (default 0)")
+    parser.add_argument("--min-bank", type=float, default=2.0,
+                        help="keep at least this much £m unspent (default 2.0)")
+    parser.add_argument("--max-bank", type=float, default=5.0,
+                        help="don't leave more than this much £m unspent (default 5.0)")
+    parser.add_argument("--min-premiums", type=int, default=2,
+                        help="require at least N attacking (MID/FWD) picks at or "
+                             "above --premium-cost (default 2)")
+    parser.add_argument("--premium-cost", type=float, default=9.0,
+                        help="price in £m that counts as an attacking premium "
+                             "(default 9.0)")
+    parser.add_argument("--bench-gk-max", type=float, default=4.5,
+                        help="require a cheap bench keeper at or below this £m so "
+                             "budget isn't wasted on a non-playing #2 (default 4.5)")
     parser.add_argument("--offline", action="store_true",
                         help="use the cached ./data snapshot instead of fetching live")
     parser.add_argument("--no-history", action="store_true",
@@ -757,7 +808,10 @@ def _main(argv: list[str] | None = None) -> int:
         report = run(budget_m=args.budget, max_player_cost_m=args.max_player_cost,
                      horizon=args.horizon, offline=args.offline,
                      min_differentials=args.differentials,
-                     use_history=not args.no_history)
+                     use_history=not args.no_history,
+                     min_bank_m=args.min_bank, max_bank_m=args.max_bank,
+                     min_premiums=args.min_premiums, premium_cost_m=args.premium_cost,
+                     bench_gk_max_m=args.bench_gk_max)
     except (RuntimeError, OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

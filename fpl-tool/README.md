@@ -31,7 +31,19 @@ python optimize_squad.py --offline          # reuse the last ./data snapshot
 python optimize_squad.py --horizon 6        # opponent look-ahead in GWs
 python optimize_squad.py --differentials 2  # force >=2 sub-10%-owned picks
 python optimize_squad.py --max-player-cost 13.0 --budget 100.0
+python optimize_squad.py --no-history       # skip the last-season pull (faster)
 ```
+
+Squad-shape levers (all have sensible defaults):
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--min-bank` / `--max-bank` | 2.0 / 5.0 | keep £2–5m unspent (flexibility reserve) |
+| `--min-premiums` | 2 | require ≥2 attacking (MID/FWD) picks at `--premium-cost`+ |
+| `--premium-cost` | 9.0 | price (£m) that counts as an attacking premium |
+| `--bench-gk-max` | 4.5 | force a cheap bench keeper so no budget is wasted on a non-playing #2 |
+| `--max-player-cost` | 13.0 | per-player cap (bars £14m+ superstars) |
+| `--differentials` | 0 | force ≥N sub-10%-owned picks |
 
 What it does:
 

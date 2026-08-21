@@ -430,8 +430,9 @@ def build_players(boot, fixtures, horizon, last_season=None, elo_by_team=None,
 
 def solve_squad(players, budget, max_cost, min_diff=0, max_per_club=3,
                 min_bank=0, max_bank=None, min_premiums=0, premium_cost=90,
-                bench_gk_max=None):
-    pool = [p for p in players if p["cost"] <= max_cost and p["score"] > 0]
+                bench_gk_max=None, fit_only=False):
+    pool = [p for p in players if p["cost"] <= max_cost and p["score"] > 0
+            and not (fit_only and p["risky"])]
     prob = pulp.LpProblem("squad", pulp.LpMaximize)
     pick = {p["id"]: pulp.LpVariable(f"p{p['id']}", cat="Binary") for p in pool}
     by_id = {p["id"]: p for p in pool}
@@ -602,6 +603,8 @@ def main():
                     help="downweight clubs you're bearish on, e.g. --fade CRY BUR")
     ap.add_argument("--fade-strength", type=float, default=0.70,
                     help="score multiplier for faded clubs (default 0.70)")
+    ap.add_argument("--fit-only", action="store_true",
+                    help="only pick fully fit players (exclude injury/doubt/suspension)")
     args, _ = ap.parse_known_args()  # ignore Colab/Jupyter's own argv
 
     print("Fetching live FPL data ...")
@@ -633,7 +636,8 @@ def main():
                         max_bank=int(round(args.max_bank * 10)),
                         min_premiums=args.min_premiums,
                         premium_cost=int(round(args.premium_cost * 10)),
-                        bench_gk_max=int(round(args.bench_gk_max * 10)))
+                        bench_gk_max=int(round(args.bench_gk_max * 10)),
+                        fit_only=args.fit_only)
     xi = solve_xi(squad)
     print("\n" + report(squad, xi, players, budget, max_cost, args.horizon,
                         args.differentials, len(last_season), len(elo_by_team)))

@@ -665,7 +665,8 @@ def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
                    max_per_club: int = 3, min_differentials: int = 0,
                    min_bank: int = 0, max_bank: int | None = None,
                    min_premiums: int = 0, premium_cost: int = 90,
-                   bench_gk_max: int | None = None) -> list[Player]:
+                   bench_gk_max: int | None = None,
+                   fit_only: bool = False) -> list[Player]:
     """Select the 15 that maximise total score under all FPL constraints.
 
     Extra levers (all in tenths of a million):
@@ -673,8 +674,10 @@ def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
       min_premiums        : require >= N attacking (MID/FWD) picks >= premium_cost.
       bench_gk_max         : require >= 1 cheap keeper (<= bench_gk_max) for the
                              bench, so budget isn't wasted on a non-playing #2.
+      fit_only            : exclude anyone not fully fit (injury/doubt/suspension).
     """
-    pool = [p for p in players if p.cost <= max_player_cost and p.score > 0]
+    pool = [p for p in players if p.cost <= max_player_cost and p.score > 0
+            and not (fit_only and p.risky)]
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
     pick = {p.id: pulp.LpVariable(f"pick_{p.id}", cat="Binary") for p in pool}
@@ -935,7 +938,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         min_premiums: int = 2, premium_cost_m: float = 9.0,
         bench_gk_max_m: float = 4.5, max_per_club: int = 3,
         use_elo: bool = True, fade=None, fade_strength: float = 0.70,
-        explain: bool = False) -> str:
+        explain: bool = False, fit_only: bool = False) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
@@ -978,7 +981,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         min_bank=int(round(min_bank_m * 10)),
         max_bank=int(round(max_bank_m * 10)),
         min_premiums=min_premiums, premium_cost=int(round(premium_cost_m * 10)),
-        bench_gk_max=int(round(bench_gk_max_m * 10)))
+        bench_gk_max=int(round(bench_gk_max_m * 10)), fit_only=fit_only)
     # --explain: diff against the previous run BEFORE overwriting saved state.
     explain_md = ""
     if explain:
@@ -1052,6 +1055,9 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--explain", action="store_true",
                         help="show what changed (prices, team news, scores, "
                              "squad swaps) since your last run")
+    parser.add_argument("--fit-only", action="store_true",
+                        help="only pick fully fit players — exclude anyone with "
+                             "an injury, doubt, or suspension flag")
     args = parser.parse_args(argv)
 
     try:
@@ -1063,7 +1069,7 @@ def _main(argv: list[str] | None = None) -> int:
                      min_premiums=args.min_premiums, premium_cost_m=args.premium_cost,
                      bench_gk_max_m=args.bench_gk_max, max_per_club=args.max_per_club,
                      fade=args.fade, fade_strength=args.fade_strength,
-                     explain=args.explain)
+                     explain=args.explain, fit_only=args.fit_only)
     except (RuntimeError, OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

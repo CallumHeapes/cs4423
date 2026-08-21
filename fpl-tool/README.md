@@ -131,6 +131,12 @@ bank, chips, and current captain, then produces one markdown digest:
 4. A **transfer plan** that respects your free transfers and only advises a
    −4 hit when the gain clearly beats it (roll otherwise).
 5. **Captain / vice** for the upcoming GW on attacking threat + fixtures.
+6. A **fixture radar** — which of your players **blank** (0 fixtures) or
+   **double** (2+) in each upcoming GW, once cup rounds create them mid-season.
+7. A **chip watch** — when to play each still-available chip: Bench Boost and
+   Triple Captain into your best double gameweek, Free Hit / Wildcard around
+   your worst blank. (Pre-season and early on, blanks/doubles don't exist yet,
+   so these say "hold" until the calendar creates them.)
 
 It reuses the exact scoring model from `optimize_squad.py`, but the last-season
 weight **decays with the gameweek** (`weight_for_gw`: 0.8 at GW1 → 0 by ~GW20),

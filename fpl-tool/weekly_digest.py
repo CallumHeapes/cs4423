@@ -31,6 +31,10 @@ ALL_CHIPS = ["wildcard", "freehit", "bboost", "3xc"]  # 2x wildcard over a seaso
 CHIP_LABELS = {"wildcard": "Wildcard", "freehit": "Free Hit",
                "bboost": "Bench Boost", "3xc": "Triple Captain"}
 
+CHIP_LOOKAHEAD = 15        # gameweeks to scan for blanks / doubles
+BLANK_ALERT = 4            # >= this many of your 15 blanking = a notable blank GW
+FULL_SQUAD = 15
+
 
 def _f(v, default: float = 0.0) -> float:
     try:
@@ -93,6 +97,125 @@ def suggest_replacements(p: opt.Player, players: list[opt.Player], my_ids: set[i
     return out[:n]
 
 
+def _team_gw_counts(fixtures, current_gw, lookahead):
+    """team_id -> {gw: number of fixtures} for the scheduled GWs ahead.
+
+    Only scheduled fixtures (event set) count. Blank/double gameweeks don't exist
+    in the data until cup rounds are drawn mid-season, so pre-season every team
+    shows exactly one fixture per GW and this correctly reports nothing notable.
+    """
+    hi = (current_gw or 0) + lookahead
+    counts = {}
+    for f in fixtures:
+        ev = f["event"]
+        if ev is None or (current_gw is not None and ev <= current_gw) or ev > hi:
+            continue
+        for tid in (f["team_h"], f["team_a"]):
+            counts.setdefault(tid, {}).setdefault(ev, 0)
+            counts[tid][ev] += 1
+    return counts
+
+
+def fixture_radar(fixtures, my_players, current_gw, lookahead=CHIP_LOOKAHEAD):
+    """Per upcoming GW: which of my players blank (0 fixtures) or double (2+),
+    and the total fixture load across my 15 (a Bench Boost score)."""
+    counts = _team_gw_counts(fixtures, current_gw, lookahead)
+    gws = sorted({f["event"] for f in fixtures if f["event"] is not None
+                  and (current_gw is None or f["event"] > current_gw)
+                  and f["event"] <= (current_gw or 0) + lookahead})
+    radar = {}
+    for gw in gws:
+        blanks = [p for p in my_players if counts.get(p.team_id, {}).get(gw, 0) == 0]
+        doubles = [p for p in my_players if counts.get(p.team_id, {}).get(gw, 0) >= 2]
+        load = sum(counts.get(p.team_id, {}).get(gw, 0) for p in my_players)
+        radar[gw] = {"blanks": blanks, "doubles": doubles, "load": load}
+    return radar
+
+
+def recommend_chips(radar, my_players, chips_available_labels):
+    """Suggest when to play each still-available chip, from the fixture radar."""
+    lines = []
+    avail = set(chips_available_labels)
+    if not radar:
+        return lines
+
+    def top_attackers(pool, k=3):
+        return sorted((p for p in pool if p.position in (3, 4)),
+                      key=lambda p: -p.attack_pts)[:k]
+
+    # Bench Boost — the GW your 15 have the most fixtures (doubles pay double).
+    if "Bench Boost" in avail:
+        bb = max(radar, key=lambda g: radar[g]["load"])
+        if radar[bb]["load"] > FULL_SQUAD:
+            n_dbl = len(radar[bb]["doubles"])
+            lines.append(f"- **Bench Boost → GW{bb}**: {n_dbl} of your 15 have a "
+                         f"double ({radar[bb]['load']} total fixtures) — the most "
+                         "points on the board from a full 15.")
+        else:
+            lines.append("- **Bench Boost**: hold — no double gameweek scheduled "
+                         "yet where your squad plays twice.")
+
+    # Triple Captain — a premium attacker with a double gameweek.
+    if "Triple Captain" in avail:
+        tc = None
+        for gw in sorted(radar):
+            dbl_att = [p for p in top_attackers(radar[gw]["doubles"], 5)]
+            if dbl_att:
+                tc = (gw, max(dbl_att, key=lambda p: p.attack_pts))
+                break
+        if tc:
+            lines.append(f"- **Triple Captain → GW{tc[0]}**: {tc[1].name} "
+                         f"({tc[1].team_short}) plays twice — captain haul on two "
+                         "games.")
+        else:
+            lines.append("- **Triple Captain**: hold for a double gameweek for one "
+                         "of your big attackers.")
+
+    # Free Hit — the worst blank gameweek for you (field a one-week team).
+    if "Free Hit" in avail:
+        fh = max(radar, key=lambda g: len(radar[g]["blanks"]))
+        n = len(radar[fh]["blanks"])
+        if n >= BLANK_ALERT:
+            lines.append(f"- **Free Hit → GW{fh}**: {n} of your 15 blank — field a "
+                         "full temporary team instead of carrying blanks.")
+        else:
+            lines.append("- **Free Hit**: hold — no big blank gameweek scheduled "
+                         "for your squad yet.")
+
+    # Wildcard — restructure ahead of a blank-heavy stretch.
+    if "Wildcard" in avail:
+        worst = max(radar, key=lambda g: len(radar[g]["blanks"]))
+        if len(radar[worst]["blanks"]) >= BLANK_ALERT:
+            lines.append(f"- **Wildcard**: consider before GW{worst} to move players "
+                         "off the blanking clubs (a permanent fix vs Free Hit's "
+                         "one-week patch).")
+        else:
+            lines.append("- **Wildcard**: hold — no fixture pile-up forcing your "
+                         "hand yet.")
+    return lines
+
+
+def _render_radar(radar, current_gw):
+    notable = [(gw, r) for gw, r in sorted(radar.items())
+               if r["blanks"] or r["doubles"]]
+    out = ["## Fixture radar — blanks & doubles ahead", ""]
+    if not notable:
+        out.append("_No blank or double gameweeks scheduled for your squad yet. "
+                   "These appear mid-season when cup rounds are drawn — this will "
+                   "populate then._")
+        out.append("")
+        return "\n".join(out)
+    rows = ["| GW | Your blanks | Your doubles |",
+            "|----|-------------|--------------|"]
+    for gw, r in notable:
+        b = ", ".join(p.name for p in r["blanks"]) or "—"
+        d = ", ".join(p.name for p in r["doubles"]) or "—"
+        rows.append(f"| {gw} | {b} | {d} |")
+    out.append("\n".join(rows))
+    out.append("")
+    return "\n".join(out)
+
+
 def build_digest(*, team_id: int, horizon: int, free_transfers: int,
                  offline: bool) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
@@ -148,14 +271,25 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
                 [p for p in cap_pool if p.id != captain.id]
     vice = max(vice_pool, key=_cap_key)
 
+    # Blank/double radar + chip predictor.
+    radar = fixture_radar(fixtures, my_players, current_gw)
+    radar_md = _render_radar(radar, current_gw)
+    chip_lines = recommend_chips(radar, my_players, available_chips)
+    chip_md = ""
+    if available_chips:
+        chip_md = "## Chip watch\n\n" + (
+            "\n".join(chip_lines) if chip_lines else
+            "_No chips available._") + "\n"
+
     return _render(entry, next_gw, bank, squad_value, free_transfers,
                    available_chips, my_players, flagged, captain, vice,
-                   current_cap, weight, horizon, el_by_id)
+                   current_cap, weight, horizon, el_by_id,
+                   extra=radar_md + "\n" + chip_md)
 
 
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
             my_players, flagged, captain, vice, current_cap, weight, horizon,
-            el_by_id) -> str:
+            el_by_id, extra="") -> str:
     name = entry.get("name", "My team")
     order = {1: 0, 2: 1, 3: 2, 4: 3}
     out = [f"# {name} — Gameweek {next_gw} digest", ""]
@@ -242,6 +376,10 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
     out.append(f"- **Vice: {vice.name} ({vice.team_short})** — backup threat from "
                "a different club.")
     out.append("")
+
+    if extra.strip():
+        out.append(extra.rstrip())
+        out.append("")
     out.append("> Prices, availability and fixtures are pulled live at run time.")
     out.append("")
     return "\n".join(out)

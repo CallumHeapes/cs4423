@@ -48,6 +48,13 @@ Squad-shape levers (all have sensible defaults):
 | `--fade CLUB…` | — | downweight clubs you're bearish on, e.g. `--fade CRY BUR` |
 | `--fade-strength` | 0.70 | score multiplier for faded clubs (0.70 = −30%) |
 | `--no-elo` | off | skip the ClubElo pull (fall back to FPL/neutral strength) |
+| `--explain` | off | show what changed since your last run — squad swaps and the price / team-news / score moves behind them |
+
+`--explain` snapshots each run to `~/.fpl_state.json` (outside the repo, so it
+survives a fresh clone within the same Colab session) and prints a "What
+changed" section: which players entered/left the squad and the exact input
+moves (price change, availability/news, penalty duty, score) that drove it. The
+first run just saves the snapshot; the diff appears from the second run on.
 
 What it does:
 

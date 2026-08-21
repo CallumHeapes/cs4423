@@ -588,6 +588,79 @@ class OptimizationError(RuntimeError):
     pass
 
 
+# ---------------------------------------------------------------------------
+# --explain: snapshot each run's inputs and diff against the previous run
+# ---------------------------------------------------------------------------
+
+
+def _snapshot(p: "Player") -> dict:
+    return {"name": p.name, "club": p.team_short, "cost": p.cost,
+            "chance": p.chance, "status": p.status, "news": p.news,
+            "pen": p.is_pen_taker, "xgi": round(p.xgi90, 2),
+            "score": round(p.score, 1)}
+
+
+def _player_deltas(prev: dict, cur: dict) -> list[str]:
+    """Human-readable field changes between two snapshots of one player."""
+    d = []
+    if prev.get("cost") != cur["cost"]:
+        d.append(f"price £{prev.get('cost', 0)/10:.1f}m → £{cur['cost']/10:.1f}m")
+    if prev.get("chance") != cur["chance"]:
+        pc = "OK" if prev.get("chance") is None else f"{prev.get('chance')}%"
+        cc = "OK" if cur["chance"] is None else f"{cur['chance']}%"
+        d.append(f"availability {pc} → {cc}")
+    if prev.get("status") != cur["status"]:
+        d.append(f"status {prev.get('status')} → {cur['status']}")
+    if (prev.get("news") or "") != (cur["news"] or ""):
+        d.append(f"news: {cur['news'] or 'cleared'}")
+    if prev.get("pen") != cur["pen"]:
+        d.append("now on penalties" if cur["pen"] else "no longer on penalties")
+    if prev.get("xgi") != cur["xgi"]:
+        d.append(f"xGI/90 {prev.get('xgi', 0):.2f} → {cur['xgi']:.2f}")
+    if round(prev.get("score", 0), 1) != cur["score"]:
+        d.append(f"score {prev.get('score', 0):.1f} → {cur['score']:.1f}")
+    return d
+
+
+def build_explain(prev_state: dict, squad: list["Player"],
+                  players: list["Player"]) -> str:
+    by_id = {p.id: p for p in players}
+    prev_squad = set(prev_state.get("squad", []))
+    prev_players = {int(k): v for k, v in prev_state.get("players", {}).items()}
+    new_squad = {p.id for p in squad}
+
+    out = ["## What changed since your last run", ""]
+    gone = prev_squad - new_squad
+    added = new_squad - prev_squad
+    if not gone and not added:
+        out.append("_Squad unchanged since your last run._")
+    else:
+        out.append("**Squad changes:**")
+        for pid in sorted(gone):
+            info = prev_players.get(pid, {})
+            nm = by_id[pid].name if pid in by_id else info.get("name", f"#{pid}")
+            cl = by_id[pid].team_short if pid in by_id else info.get("club", "?")
+            out.append(f"- **OUT** {nm} ({cl})")
+        for pid in sorted(added):
+            p = by_id.get(pid)
+            out.append(f"- **IN** {p.name} ({p.team_short})" if p else f"- **IN** #{pid}")
+        out.append("")
+        out.append("**Why — what moved on the swapped players:**")
+        for pid in sorted(gone | added):
+            p = by_id.get(pid)
+            if not p:
+                continue
+            deltas = _player_deltas(prev_players.get(pid, {}), _snapshot(p))
+            tag = "OUT" if pid in gone else "IN"
+            if deltas:
+                out.append(f"- {p.name} ({tag}): " + "; ".join(deltas))
+            else:
+                out.append(f"- {p.name} ({tag}): no input change — moved to "
+                           "rebalance the budget around another swap.")
+    out.append("")
+    return "\n".join(out)
+
+
 def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
                    max_per_club: int = 3, min_differentials: int = 0,
                    min_bank: int = 0, max_bank: int | None = None,
@@ -684,7 +757,8 @@ def _squad_table(players: Iterable[Player]) -> str:
 
 def build_report(squad: list[Player], xi: list[Player], all_players: list[Player],
                  *, budget: int, max_player_cost: int, horizon: int,
-                 min_differentials: int, n_history: int = 0, n_elo: int = 0) -> str:
+                 min_differentials: int, n_history: int = 0, n_elo: int = 0,
+                 explain_md: str = "") -> str:
     xi_ids = {p.id for p in xi}
     bench = [p for p in squad if p.id not in xi_ids]
     bench_gk = [p for p in bench if p.position == 1]
@@ -718,6 +792,10 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
         out.append(f"**Team strength:** ClubElo ratings for {n_elo} clubs  ")
     out.append(f"**Starting XI formation:** {_formation(xi)}")
     out.append("")
+
+    if explain_md.strip():
+        out.append(explain_md.rstrip())
+        out.append("")
 
     out.append("## Full squad (15)")
     out.append("")
@@ -856,7 +934,8 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         min_bank_m: float = 2.0, max_bank_m: float = 5.0,
         min_premiums: int = 2, premium_cost_m: float = 9.0,
         bench_gk_max_m: float = 4.5, max_per_club: int = 3,
-        use_elo: bool = True, fade=None, fade_strength: float = 0.70) -> str:
+        use_elo: bool = True, fade=None, fade_strength: float = 0.70,
+        explain: bool = False) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
 
@@ -900,6 +979,20 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
         max_bank=int(round(max_bank_m * 10)),
         min_premiums=min_premiums, premium_cost=int(round(premium_cost_m * 10)),
         bench_gk_max=int(round(bench_gk_max_m * 10)))
+    # --explain: diff against the previous run BEFORE overwriting saved state.
+    explain_md = ""
+    if explain:
+        prev = fetch_data.load_explain_state()
+        if prev and prev.get("players"):
+            explain_md = build_explain(prev, squad, players)
+        else:
+            explain_md = ("## What changed since your last run\n\n_First run on "
+                          "this machine — nothing to compare yet. Re-run with "
+                          "`--explain` next time to see what moved._\n")
+        fetch_data.save_explain_state(
+            {"squad": [p.id for p in squad],
+             "players": {p.id: _snapshot(p) for p in players}})
+
     try:  # remember the proposed 15 for benchmark.py (best-effort)
         fetch_data.save_squad([p.id for p in squad])
     except OSError:
@@ -908,7 +1001,8 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
     return build_report(squad, xi, players, budget=budget,
                         max_player_cost=max_player_cost, horizon=horizon,
                         min_differentials=min_differentials,
-                        n_history=len(last_season), n_elo=len(elo_by_team))
+                        n_history=len(last_season), n_elo=len(elo_by_team),
+                        explain_md=explain_md)
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -955,6 +1049,9 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fade-strength", type=float, default=0.70,
                         help="score multiplier applied to faded clubs (default "
                              "0.70 = a 30%% haircut)")
+    parser.add_argument("--explain", action="store_true",
+                        help="show what changed (prices, team news, scores, "
+                             "squad swaps) since your last run")
     args = parser.parse_args(argv)
 
     try:
@@ -965,7 +1062,8 @@ def _main(argv: list[str] | None = None) -> int:
                      min_bank_m=args.min_bank, max_bank_m=args.max_bank,
                      min_premiums=args.min_premiums, premium_cost_m=args.premium_cost,
                      bench_gk_max_m=args.bench_gk_max, max_per_club=args.max_per_club,
-                     fade=args.fade, fade_strength=args.fade_strength)
+                     fade=args.fade, fade_strength=args.fade_strength,
+                     explain=args.explain)
     except (RuntimeError, OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

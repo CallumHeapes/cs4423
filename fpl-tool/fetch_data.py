@@ -242,6 +242,27 @@ def load_squad(team_id: int | None = None) -> list[int] | None:
     return data.get("ids") if data else None
 
 
+# --explain state lives OUTSIDE the repo (~/.fpl_state.json) so it survives a
+# fresh `git clone` / `rm -rf` within the same Colab runtime and can diff runs.
+STATE_PATH = os.path.expanduser("~/.fpl_state.json")
+
+
+def save_explain_state(state: dict) -> None:
+    try:
+        with open(STATE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+    except OSError:
+        pass
+
+
+def load_explain_state() -> dict | None:
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 CLUBELO_URL = "https://api.clubelo.com"
 
 

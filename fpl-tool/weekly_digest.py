@@ -324,6 +324,13 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
 
     perf_md = performance_summary(history)
 
+    # Diagnostic: surface any section that isn't a string (root-cause a crash).
+    for _n, _v in (("radar_md", radar_md), ("chip_md", chip_md),
+                   ("perf_md", perf_md)):
+        if not isinstance(_v, str):
+            print(f"WARN: {_n} is {type(_v).__name__} ({_v!r}) — coercing.",
+                  file=sys.stderr)
+
     return _render(entry, next_gw, bank, squad_value, free_transfers,
                    available_chips, my_players, flagged, captain, vice,
                    current_cap, weight, horizon, el_by_id,
@@ -333,6 +340,9 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
             my_players, flagged, captain, vice, current_cap, weight, horizon,
             el_by_id, extra="", perf_md="") -> str:
+    # Defensive: never let a non-string section crash the whole digest.
+    extra = extra if isinstance(extra, str) else ("" if extra is None else str(extra))
+    perf_md = perf_md if isinstance(perf_md, str) else ("" if perf_md is None else str(perf_md))
     name = entry.get("name", "My team")
     order = {1: 0, 2: 1, 3: 2, 4: 3}
     out = [f"# {name} — Gameweek {next_gw} digest", ""]

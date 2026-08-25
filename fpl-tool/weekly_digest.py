@@ -97,6 +97,47 @@ def suggest_replacements(p: opt.Player, players: list[opt.Player], my_ids: set[i
     return out[:n]
 
 
+def performance_summary(history: dict) -> str:
+    """Season-so-far scoreboard from the entry's per-GW history."""
+    current = history.get("current", [])
+    if not current:
+        return ""
+    latest = current[-1]
+    prev = current[-2] if len(current) >= 2 else None
+    gw = latest.get("event")
+    gw_pts = latest.get("points", 0)
+    bench = latest.get("points_on_bench", 0)
+    total = latest.get("total_points", 0)
+    o_rank = latest.get("overall_rank")
+    value = latest.get("value", 0) / 10
+    hit = latest.get("event_transfers_cost", 0)
+
+    out = ["## Season so far", ""]
+    line = f"- **GW{gw}:** {gw_pts} pts"
+    if hit:
+        line += f" (after a −{hit} hit)"
+    line += f" · {bench} left on the bench"
+    out.append(line)
+    if o_rank is not None:
+        move = ""
+        if prev and prev.get("overall_rank"):
+            delta = prev["overall_rank"] - o_rank  # + = climbed
+            if delta > 0:
+                move = f" ▲ {delta:,} places"
+            elif delta < 0:
+                move = f" ▼ {abs(delta):,} places"
+        out.append(f"- **Overall rank:** {o_rank:,}{move}")
+    out.append(f"- **Total points:** {total} · **Squad value:** £{value:.1f}m")
+    # Best / worst GW so far.
+    if len(current) >= 2:
+        best = max(current, key=lambda g: g.get("points", 0))
+        worst = min(current, key=lambda g: g.get("points", 0))
+        out.append(f"- **Best GW:** {best.get('points')} (GW{best.get('event')}) · "
+                   f"**Worst:** {worst.get('points')} (GW{worst.get('event')})")
+    out.append("")
+    return "\n".join(out)
+
+
 def _team_gw_counts(fixtures, current_gw, lookahead):
     """team_id -> {gw: number of fixtures} for the scheduled GWs ahead.
 
@@ -281,18 +322,23 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
             "\n".join(chip_lines) if chip_lines else
             "_No chips available._") + "\n"
 
+    perf_md = performance_summary(history)
+
     return _render(entry, next_gw, bank, squad_value, free_transfers,
                    available_chips, my_players, flagged, captain, vice,
                    current_cap, weight, horizon, el_by_id,
-                   extra=radar_md + "\n" + chip_md)
+                   extra=radar_md + "\n" + chip_md, perf_md=perf_md)
 
 
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
             my_players, flagged, captain, vice, current_cap, weight, horizon,
-            el_by_id, extra="") -> str:
+            el_by_id, extra="", perf_md="") -> str:
     name = entry.get("name", "My team")
     order = {1: 0, 2: 1, 3: 2, 4: 3}
     out = [f"# {name} — Gameweek {next_gw} digest", ""]
+    if perf_md.strip():
+        out.append(perf_md.rstrip())
+        out.append("")
     out.append(f"**In the bank:** £{bank/10:.1f}m · **Squad value:** "
                f"£{squad_value/10:.1f}m · **Free transfers:** {free_transfers} "
                f"(extra transfers cost -4 pts)  ")

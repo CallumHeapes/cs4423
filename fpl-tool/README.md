@@ -130,6 +130,8 @@ python weekly_digest.py --horizon 6
 `weekly_digest.py` pulls your actual squad (`/entry/5156799/event/{gw}/picks`),
 bank, chips, and current captain, then produces one markdown digest:
 
+0. **Season so far** — last GW points, overall rank + movement, total points,
+   squad-value growth, and your best/worst gameweek (a performance scoreboard).
 1. Fixture outlook over the next `--horizon` GWs for every club you own.
 2. **Flags** each owned player for bad fixture runs, form dips, price-drop risk
    (heavy net transfers out), or availability (injury/suspension/doubt).

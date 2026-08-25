@@ -324,13 +324,6 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
 
     perf_md = performance_summary(history)
 
-    # Diagnostic: surface any section that isn't a string (root-cause a crash).
-    for _n, _v in (("radar_md", radar_md), ("chip_md", chip_md),
-                   ("perf_md", perf_md)):
-        if not isinstance(_v, str):
-            print(f"WARN: {_n} is {type(_v).__name__} ({_v!r}) — coercing.",
-                  file=sys.stderr)
-
     return _render(entry, next_gw, bank, squad_value, free_transfers,
                    available_chips, my_players, flagged, captain, vice,
                    current_cap, weight, horizon, el_by_id,
@@ -387,8 +380,8 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
                 for q in repl:
                     el = el_by_id.get(q.id, {})
                     delta = q.score - p.score
-                    extra = ((q.cost - p.cost) / 10)
-                    money = ("free swap" if extra <= 0 else f"+£{extra:.1f}m")
+                    cost_diff = ((q.cost - p.cost) / 10)
+                    money = ("free swap" if cost_diff <= 0 else f"+£{cost_diff:.1f}m")
                     out.append(f"  - → **{q.name} ({q.team_short}, £{q.cost_m:.1f}m)** "
                                f"— +{delta:.1f} projected over {horizon} GWs, {money}, "
                                f"form {_f(el.get('form')):.1f}, own {q.selected_by:.1f}%")

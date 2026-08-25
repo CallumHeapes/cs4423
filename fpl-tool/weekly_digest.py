@@ -27,6 +27,9 @@ import optimize_squad as opt
 FDR_BAD = 3.4              # avg fixture difficulty over the horizon
 FORM_DIP_REL = 1.5        # form this far below season PPG = a dip
 PRICE_DROP_NET = 40000    # net transfers out (this GW) that hints at a price drop
+# A suggested transfer must beat the player it replaces by at least this much
+# projected score (over the horizon) to be worth showing — filters trivial swaps.
+MIN_SUGGEST_GAIN = 6.0
 ALL_CHIPS = ["wildcard", "freehit", "bboost", "3xc"]  # 2x wildcard over a season
 CHIP_LABELS = {"wildcard": "Wildcard", "freehit": "Free Hit",
                "bboost": "Bench Boost", "3xc": "Triple Captain"}
@@ -48,7 +51,9 @@ def _cap_key(p: opt.Player) -> float:
 
 
 def flag_reasons(p: opt.Player, el: dict, horizon: int) -> list[str]:
-    """Reasons this owned player might warrant attention this week."""
+    """Genuine *points* reasons to consider moving this player. Price drops are
+    a value signal, not a points one, so they are handled separately (see
+    price_drop_risk) and never trigger a transfer suggestion on their own."""
     reasons: list[str] = []
     status = el.get("status", "a")
     chance = el.get("chance_of_playing_next_round")
@@ -66,11 +71,14 @@ def flag_reasons(p: opt.Player, el: dict, horizon: int) -> list[str]:
     form, ppg = _f(el.get("form")), _f(el.get("points_per_game"))
     if ppg > 0 and form < ppg - FORM_DIP_REL:
         reasons.append(f"form dip (form {form:.1f} vs season {ppg:.1f})")
-
-    net_out = _f(el.get("transfers_out_event")) - _f(el.get("transfers_in_event"))
-    if net_out > PRICE_DROP_NET:
-        reasons.append("price-drop risk (heavy net transfers out)")
     return reasons
+
+
+def price_drop_risk(el: dict) -> bool:
+    """Heavy net transfers out this GW — hints the player may lose value soon.
+    Informational only (affects team value, not points)."""
+    net_out = _f(el.get("transfers_out_event")) - _f(el.get("transfers_in_event"))
+    return net_out > PRICE_DROP_NET
 
 
 def suggest_replacements(p: opt.Player, players: list[opt.Player], my_ids: set[int],
@@ -86,7 +94,7 @@ def suggest_replacements(p: opt.Player, players: list[opt.Player], my_ids: set[i
     for q in players:
         if q.position != p.position or q.id in my_ids:
             continue
-        if q.cost > budget or q.score <= p.score:
+        if q.cost > budget or q.score - p.score < MIN_SUGGEST_GAIN:
             continue
         # Club rule: swapping within the same club is fine; otherwise the new
         # club must currently hold < 3 of my players.
@@ -297,13 +305,16 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
     my_players = [by_id[i] for i in my_pick_ids if i in by_id]
     club_counts = Counter(p.team_id for p in my_players)
 
-    # Flag + suggest.
+    # Flag (real points concerns) + suggest; price drops tracked separately.
     flagged = []
+    price_watch = []
     for p in my_players:
         reasons = flag_reasons(p, el_by_id.get(p.id, {}), horizon)
         if reasons:
             flagged.append((p, reasons, suggest_replacements(
                 p, players, my_ids, bank, club_counts)))
+        if price_drop_risk(el_by_id.get(p.id, {})):
+            price_watch.append(p)
 
     # Captain: best attacking threat among my mids/forwards.
     cap_pool = [p for p in my_players if p.position in (3, 4)] or my_players
@@ -324,10 +335,17 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
 
     perf_md = performance_summary(history)
 
+    price_md = ""
+    if price_watch:
+        names = ", ".join(f"{p.name} ({p.team_short})" for p in price_watch)
+        price_md = ("## Price watch (value only)\n\n_Heavy net transfers out — "
+                    "these may drop £0.1m soon. A team-value note, **not** a reason "
+                    f"to sell: {names}._\n")
+
     return _render(entry, next_gw, bank, squad_value, free_transfers,
                    available_chips, my_players, flagged, captain, vice,
                    current_cap, weight, horizon, el_by_id,
-                   extra=radar_md + "\n" + chip_md, perf_md=perf_md)
+                   extra=price_md + "\n" + radar_md + "\n" + chip_md, perf_md=perf_md)
 
 
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,

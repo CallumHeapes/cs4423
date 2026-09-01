@@ -314,6 +314,99 @@ def get_club_elo(*, refresh: bool = True, offline: bool = False,
     return out
 
 
+FOOTBALL_DATA_URL = "https://www.football-data.co.uk/mmz4281"
+
+
+def _season_code(on_date: "datetime.date | None" = None) -> str:
+    """football-data.co.uk season code, e.g. '2526' for 2025/26. The PL season
+    spans Aug->May, so July onward already belongs to the new season."""
+    d = on_date or datetime.date.today()
+    start = d.year if d.month >= 7 else d.year - 1
+    return f"{start % 100:02d}{(start + 1) % 100:02d}"
+
+
+def _implied_probs(h: float, d: float, a: float):
+    """Decimal home/draw/away odds -> overround-free win probabilities."""
+    try:
+        ih, idr, ia = 1.0 / h, 1.0 / d, 1.0 / a
+    except ZeroDivisionError:
+        return None
+    tot = ih + idr + ia
+    if tot <= 0:
+        return None
+    return ih / tot, idr / tot, ia / tot
+
+
+def get_betting_strength(*, refresh: bool = True, offline: bool = False,
+                         season: str | None = None) -> dict[str, float]:
+    """Team strength from bookmaker match odds (football-data.co.uk, free, no
+    key). For each played match the market's odds are converted to overround-
+    free win probabilities, and each team is credited the win probability the
+    market gave it; a team's strength is its average across all its matches so
+    far. This is a forward-looking quality signal — the market prices form and
+    squad quality in before the FPL API updates its own strengths.
+
+    (Early season it's noisy and confounded by who you've played; it settles as
+    matches accrue, and build_players clamps the resulting multiplier anyway.)
+
+    Maps club name -> strength (0..1). Cached to ./data/odds.json. Returns {}
+    (graceful) when unreachable or too early in the season, so the optimizer
+    falls back to ClubElo / FPL strength.
+    """
+    name = "odds"
+    if offline:
+        return _load_cache(name) or {}
+    if not refresh:
+        cached = _load_cache(name)
+        if cached is not None:
+            return cached
+    code = season or _season_code()
+    ua = {"User-Agent": HEADERS["User-Agent"]}  # returns CSV, not JSON
+    try:
+        resp = requests.get(f"{FOOTBALL_DATA_URL}/{code}/E0.csv", headers=ua,
+                            timeout=30)
+        resp.raise_for_status()
+        text = resp.text
+    except requests.RequestException as exc:
+        print(f"Betting odds unavailable ({exc}) — falling back to ClubElo/FPL "
+              "team strength.", file=sys.stderr)
+        return _load_cache(name) or {}
+    sums: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    for row in csv.DictReader(io.StringIO(text)):
+        home, away = row.get("HomeTeam"), row.get("AwayTeam")
+        if not home or not away:
+            continue
+        odds = None  # prefer the market-average columns, else a specific book
+        for pre in ("Avg", "B365", "PS", "BF", "Max"):
+            try:
+                h = float(row.get(f"{pre}H") or 0)
+                dr = float(row.get(f"{pre}D") or 0)
+                a = float(row.get(f"{pre}A") or 0)
+            except ValueError:
+                continue
+            if h > 1 and dr > 1 and a > 1:
+                odds = (h, dr, a)
+                break
+        if odds is None:
+            continue
+        probs = _implied_probs(*odds)
+        if probs is None:
+            continue
+        ph, _pd, pa = probs
+        sums[home] = sums.get(home, 0.0) + ph
+        counts[home] = counts.get(home, 0) + 1
+        sums[away] = sums.get(away, 0.0) + pa
+        counts[away] = counts.get(away, 0) + 1
+    out = {club: sums[club] / counts[club] for club in sums if counts.get(club)}
+    if out:
+        _save_cache(name, out)
+    else:
+        print(f"Betting odds: no completed matches parsed for season {code} yet "
+              "— falling back to ClubElo/FPL.", file=sys.stderr)
+    return out
+
+
 def _hist_float(value) -> float:
     try:
         return float(value) if value not in (None, "") else 0.0

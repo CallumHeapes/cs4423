@@ -47,7 +47,7 @@ Squad-shape levers (all have sensible defaults):
 | `--differentials` | 0 | force ≥N sub-10%-owned picks |
 | `--fade CLUB…` | — | downweight clubs you're bearish on, e.g. `--fade CRY BUR` |
 | `--fade-strength` | 0.70 | score multiplier for faded clubs (0.70 = −30%) |
-| `--no-elo` | off | skip the ClubElo pull (fall back to FPL/neutral strength) |
+| `--no-elo` | off | skip the external team-strength pull — betting odds, then ClubElo (fall back to FPL/neutral strength) |
 | `--fit-only` | off | only pick fully fit players — hard-exclude anyone with an injury, doubt, or suspension flag |
 | `--explain` | off | show what changed since your last run — squad swaps and the price / team-news / score moves behind them |
 
@@ -85,11 +85,14 @@ What it does:
      — the optimizer still prefers a few genuine premium anchors over a flat
      spread. Minutes security down-weights anyone < 75% to play.
    - **Team-strength prior:** attacking output is tempered by the player's own
-     team quality. It uses live **ClubElo** ratings (`api.clubelo.com`, free, no
-     key) — a forward-looking signal that rates a projected-relegation side down
-     *before* FPL publishes its own strengths — falling back to FPL's ratings,
-     then neutral. Attackers on low-rated sides get a "weak team attack" flag.
-     Skip the pull with `--no-elo`.
+     team quality. It uses live **bookmaker match odds** (football-data.co.uk,
+     free, no key): each played match's odds are stripped of the overround and
+     each team is credited the win probability the market gave it, so a team's
+     strength is its average market-implied win probability so far — a forward-
+     looking signal that prices squad quality and form in *before* FPL updates
+     its own strengths. It falls back to **ClubElo** (`api.clubelo.com`), then
+     FPL's ratings, then neutral. Attackers on low-rated sides get a "weak team
+     attack" flag. Skip the pull with `--no-elo`.
 4. Runs a constrained integer program that **maximises total expected points**
    under the FPL rules — 15 players (2/5/5/3), £100.0m, max 3 per club —
    **plus a per-player price cap** (default £13.0m) so no single £15m+ superstar
@@ -141,11 +144,14 @@ bank, chips, and current captain, then produces one markdown digest:
 4. A **transfer plan** that respects your free transfers and only advises a
    −4 hit when the gain clearly beats it (roll otherwise).
 4b. **Template holes** — elite picks (owned by ≥40% of the top managers) you're
-    missing but could afford in one move, each with the funding swap. Rank-
-    protection moves, surfaced from the same signal as `benchmark.py` so you
-    don't have to cross-reference. Skip with `--no-template`; size with `--top`.
-    Price drops sit in a separate "Price watch (value only)" note, never as a
-    sell signal.
+    missing but could afford in one move, each with the funding swap and its
+    projected-points Δ. Rank-protection moves, surfaced from the same signal as
+    `benchmark.py` so you don't have to cross-reference. Moves are never hidden:
+    a swap funded by selling a **premium** carries a ⚠ and an honest negative Δ
+    (it costs points on the model, but a premium doesn't have to stay every week
+    if you rate the incoming pick) — you decide. Skip with `--no-template`; size
+    with `--top`. Price drops sit in a separate "Price watch (value only)" note,
+    never as a sell signal.
 5. **Captain / vice** for the upcoming GW on attacking threat + fixtures.
 6. A **fixture radar** — which of your players **blank** (0 fixtures) or
    **double** (2+) in each upcoming GW, once cup rounds create them mid-season.

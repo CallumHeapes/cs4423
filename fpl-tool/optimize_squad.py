@@ -761,7 +761,7 @@ def _squad_table(players: Iterable[Player]) -> str:
 def build_report(squad: list[Player], xi: list[Player], all_players: list[Player],
                  *, budget: int, max_player_cost: int, horizon: int,
                  min_differentials: int, n_history: int = 0, n_elo: int = 0,
-                 explain_md: str = "") -> str:
+                 strength_source: str = "ClubElo", explain_md: str = "") -> str:
     xi_ids = {p.id for p in xi}
     bench = [p for p in squad if p.id not in xi_ids]
     bench_gk = [p for p in bench if p.position == 1]
@@ -792,7 +792,8 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
         out.append(f"**Goals/assists basis:** last season pooled with current "
                    f"for {n_history} players  ")
     if n_elo:
-        out.append(f"**Team strength:** ClubElo ratings for {n_elo} clubs  ")
+        out.append(f"**Team strength:** {strength_source} ratings for {n_elo} "
+                   "clubs  ")
     out.append(f"**Starting XI formation:** {_formation(xi)}")
     out.append("")
 
@@ -953,15 +954,27 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
                   file=sys.stderr)
 
     elo_by_team: dict[int, float] = {}
+    strength_source = "ClubElo"
     if use_elo:
-        elo_names = fetch_data.get_club_elo(refresh=not offline, offline=offline)
-        elo_by_team = map_elo_to_teams(elo_names, bootstrap["teams"])
+        # Primary: bookmaker match odds (forward-looking, prices quality/form
+        # before FPL updates its own strengths). Fall back to ClubElo, then FPL.
+        odds_names = fetch_data.get_betting_strength(
+            refresh=not offline, offline=offline)
+        elo_by_team = map_elo_to_teams(odds_names, bootstrap["teams"])
         if elo_by_team:
-            print(f"ClubElo team ratings loaded for {len(elo_by_team)} clubs.",
-                  file=sys.stderr)
-        elif elo_names:
-            print(f"ClubElo fetched {len(elo_names)} clubs but none mapped to FPL "
-                  "teams — check name aliases.", file=sys.stderr)
+            strength_source = "Betting odds"
+            print(f"Betting-odds team strength loaded for {len(elo_by_team)} "
+                  "clubs.", file=sys.stderr)
+        else:
+            elo_names = fetch_data.get_club_elo(
+                refresh=not offline, offline=offline)
+            elo_by_team = map_elo_to_teams(elo_names, bootstrap["teams"])
+            if elo_by_team:
+                print(f"ClubElo team ratings loaded for {len(elo_by_team)} "
+                      "clubs.", file=sys.stderr)
+            elif elo_names or odds_names:
+                print("Team-strength source fetched rows but none mapped to FPL "
+                      "teams — check name aliases.", file=sys.stderr)
 
     fade_ids = resolve_team_tokens(fade, bootstrap["teams"])
     if fade_ids:
@@ -1005,7 +1018,7 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
                         max_player_cost=max_player_cost, horizon=horizon,
                         min_differentials=min_differentials,
                         n_history=len(last_season), n_elo=len(elo_by_team),
-                        explain_md=explain_md)
+                        strength_source=strength_source, explain_md=explain_md)
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -1044,8 +1057,8 @@ def _main(argv: list[str] | None = None) -> int:
                         help="skip the last-season pull (faster; weaker pre-season "
                              "goals/assists signal)")
     parser.add_argument("--no-elo", action="store_true",
-                        help="skip the ClubElo team-strength pull (falls back to "
-                             "FPL's own ratings)")
+                        help="skip the external team-strength pull — betting odds, "
+                             "then ClubElo (falls back to FPL's own ratings)")
     parser.add_argument("--fade", nargs="+", metavar="CLUB", default=None,
                         help="downweight specific clubs you're bearish on, e.g. "
                              "--fade CRY BUR (use FPL short names)")

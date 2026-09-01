@@ -170,6 +170,64 @@ def get_club_elo():
     return out
 
 
+def _season_code():
+    """football-data.co.uk season code, e.g. '2526' for 2025/26 (Aug->May)."""
+    d = datetime.date.today()
+    start = d.year if d.month >= 7 else d.year - 1
+    return f"{start % 100:02d}{(start + 1) % 100:02d}"
+
+
+def get_betting_strength():
+    """Team strength {club_name: 0..1} from bookmaker match odds (football-data.
+    co.uk, free, no key). Each played match's odds -> overround-free win probs;
+    a team's strength is its average win prob so far. Forward-looking quality
+    signal; {} if unreachable or too early (graceful)."""
+    code = _season_code()
+    ua = {"User-Agent": HEADERS["User-Agent"]}  # returns CSV, not JSON
+    try:
+        resp = requests.get(
+            f"https://www.football-data.co.uk/mmz4281/{code}/E0.csv",
+            headers=ua, timeout=30)
+        resp.raise_for_status()
+        text = resp.text
+    except requests.RequestException as exc:
+        print(f"Betting odds unavailable ({exc}) — falling back to ClubElo/FPL.")
+        return {}
+    sums, counts = {}, {}
+    for row in csv.DictReader(io.StringIO(text)):
+        home, away = row.get("HomeTeam"), row.get("AwayTeam")
+        if not home or not away:
+            continue
+        odds = None
+        for pre in ("Avg", "B365", "PS", "BF", "Max"):
+            try:
+                h = float(row.get(f"{pre}H") or 0)
+                dr = float(row.get(f"{pre}D") or 0)
+                a = float(row.get(f"{pre}A") or 0)
+            except ValueError:
+                continue
+            if h > 1 and dr > 1 and a > 1:
+                odds = (h, dr, a)
+                break
+        if odds is None:
+            continue
+        h, dr, a = odds
+        ih, idr, ia = 1.0 / h, 1.0 / dr, 1.0 / a
+        tot = ih + idr + ia
+        if tot <= 0:
+            continue
+        ph, pa = ih / tot, ia / tot
+        sums[home] = sums.get(home, 0.0) + ph
+        counts[home] = counts.get(home, 0) + 1
+        sums[away] = sums.get(away, 0.0) + pa
+        counts[away] = counts.get(away, 0) + 1
+    out = {c: sums[c] / counts[c] for c in sums if counts.get(c)}
+    if not out:
+        print(f"Betting odds: no completed matches for season {code} yet — "
+              "falling back to ClubElo/FPL.")
+    return out
+
+
 def resolve_team_tokens(tokens, teams):
     if not tokens:
         return set()
@@ -617,9 +675,14 @@ def main():
 
     elo_by_team = {}
     if USE_ELO and not args.no_elo:
-        elo_by_team = map_elo_to_teams(get_club_elo(), boot["teams"])
+        # Betting odds first (forward-looking), then ClubElo, then FPL/neutral.
+        elo_by_team = map_elo_to_teams(get_betting_strength(), boot["teams"])
         if elo_by_team:
-            print(f"ClubElo ratings loaded for {len(elo_by_team)} clubs.")
+            print(f"Betting-odds team strength loaded for {len(elo_by_team)} clubs.")
+        else:
+            elo_by_team = map_elo_to_teams(get_club_elo(), boot["teams"])
+            if elo_by_team:
+                print(f"ClubElo ratings loaded for {len(elo_by_team)} clubs.")
 
     fade_ids = resolve_team_tokens(args.fade, boot["teams"])
     if fade_ids:

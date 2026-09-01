@@ -38,6 +38,9 @@ CHIP_LOOKAHEAD = 15        # gameweeks to scan for blanks / doubles
 BLANK_ALERT = 4            # >= this many of your 15 blanking = a notable blank GW
 ELITE_TEMPLATE = 0.40     # owned by >= this share of top managers = a template pick
 TEMPLATE_TOP_N = 50       # how many top managers to read elite ownership from
+# Don't surface a template hole if funding it would sacrifice a player worth this
+# many more projected points — it isn't a sensible one-move add (needs a wildcard).
+TEMPLATE_MAX_SACRIFICE = -8.0
 FULL_SQUAD = 15
 
 
@@ -141,6 +144,8 @@ def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
         if not affordable:  # can't fit with one sale — a bigger restructure
             continue
         sell = min(affordable, key=lambda q: q.score)  # sacrifice the weakest link
+        if hp.score - sell.score < TEMPLATE_MAX_SACRIFICE:
+            continue  # funding it would bin a much better player — needs a wildcard
         result.append((hp, share, sell))
     return result
 

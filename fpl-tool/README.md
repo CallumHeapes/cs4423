@@ -140,6 +140,12 @@ bank, chips, and current captain, then produces one markdown digest:
    ranked by projected-points gain.
 4. A **transfer plan** that respects your free transfers and only advises a
    −4 hit when the gain clearly beats it (roll otherwise).
+4b. **Template holes** — elite picks (owned by ≥40% of the top managers) you're
+    missing but could afford in one move, each with the funding swap. Rank-
+    protection moves, surfaced from the same signal as `benchmark.py` so you
+    don't have to cross-reference. Skip with `--no-template`; size with `--top`.
+    Price drops sit in a separate "Price watch (value only)" note, never as a
+    sell signal.
 5. **Captain / vice** for the upcoming GW on attacking threat + fixtures.
 6. A **fixture radar** — which of your players **blank** (0 fixtures) or
    **double** (2+) in each upcoming GW, once cup rounds create them mid-season.

@@ -36,6 +36,8 @@ CHIP_LABELS = {"wildcard": "Wildcard", "freehit": "Free Hit",
 
 CHIP_LOOKAHEAD = 15        # gameweeks to scan for blanks / doubles
 BLANK_ALERT = 4            # >= this many of your 15 blanking = a notable blank GW
+ELITE_TEMPLATE = 0.40     # owned by >= this share of top managers = a template pick
+TEMPLATE_TOP_N = 50       # how many top managers to read elite ownership from
 FULL_SQUAD = 15
 
 
@@ -103,6 +105,44 @@ def suggest_replacements(p: opt.Player, players: list[opt.Player], my_ids: set[i
         out.append(q)
     out.sort(key=lambda q: -q.score)
     return out[:n]
+
+
+def elite_ownership(top_n: int, gw: int) -> tuple[dict[int, float], int]:
+    """{player_id: share of the top `top_n` managers who own them}, plus the
+    number of managers actually read. Same signal benchmark.py uses."""
+    mgr_ids = fetch_data.get_top_manager_ids(top_n)
+    picks_by = fetch_data.get_manager_picks_bulk(mgr_ids, gw)
+    n = len(picks_by)
+    if not n:
+        return {}, 0
+    own: Counter = Counter()
+    for p in picks_by.values():
+        for pk in p["picks"]:
+            own[pk["element"]] += 1
+    return {pid: c / n for pid, c in own.items()}, n
+
+
+def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
+    """Elite picks you don't own, that you could afford by selling one of your
+    same-position players. Returns [(hole_player, elite_share, sell_player)],
+    most-owned first. These are rank-protection moves, distinct from the
+    points-based transfer suggestions."""
+    my_ids = {p.id for p in my_players}
+    holes = sorted(((pid, s) for pid, s in elite.items()
+                    if s >= ELITE_TEMPLATE and pid not in my_ids),
+                   key=lambda t: -t[1])
+    result = []
+    for pid, share in holes:
+        hp = by_id.get(pid)
+        if hp is None:
+            continue
+        same = [q for q in my_players if q.position == hp.position]
+        affordable = [q for q in same if q.cost + bank >= hp.cost]
+        if not affordable:  # can't fit with one sale — a bigger restructure
+            continue
+        sell = min(affordable, key=lambda q: q.score)  # sacrifice the weakest link
+        result.append((hp, share, sell))
+    return result
 
 
 def performance_summary(history: dict) -> str:
@@ -266,7 +306,8 @@ def _render_radar(radar, current_gw):
 
 
 def build_digest(*, team_id: int, horizon: int, free_transfers: int,
-                 offline: bool) -> str:
+                 offline: bool, use_template: bool = True,
+                 template_top_n: int = TEMPLATE_TOP_N) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
     current_gw, next_gw = fetch_data.current_and_next_gw(bootstrap)
@@ -342,10 +383,46 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
                     "these may drop £0.1m soon. A team-value note, **not** a reason "
                     f"to sell: {names}._\n")
 
+    # Template holes — elite picks you're missing that you could afford.
+    template_md = ""
+    if use_template:
+        print(f"Reading elite ownership from the top {template_top_n} managers...",
+              file=sys.stderr)
+        elite, n_elite = elite_ownership(template_top_n, current_gw)
+        holes = template_holes(elite, my_players, by_id, bank) if elite else []
+        template_md = _render_template(holes, n_elite)
+
     return _render(entry, next_gw, bank, squad_value, free_transfers,
                    available_chips, my_players, flagged, captain, vice,
                    current_cap, weight, horizon, el_by_id,
-                   extra=price_md + "\n" + radar_md + "\n" + chip_md, perf_md=perf_md)
+                   extra=template_md + "\n" + price_md + "\n" + radar_md + "\n" + chip_md,
+                   perf_md=perf_md)
+
+
+def _render_template(holes, n_elite) -> str:
+    out = [f"## Template holes — what the top {n_elite} managers own that you don't",
+           ""]
+    if not holes:
+        out.append("_You cover the affordable template — no elite pick is both "
+                   "heavily owned and a one-transfer add for you right now._")
+        out.append("")
+        return "\n".join(out)
+    out.append("_Rank-protection moves: if one of these hauls, the field pulls "
+               "away from you. Ranked by elite ownership._")
+    out.append("")
+    rows = ["| Bring in | Pos | Club | £m | Elite% | Fund by selling | Δ score |",
+            "|----------|-----|------|----|--------|-----------------|---------|"]
+    for hp, share, sell in holes[:6]:
+        delta = hp.score - sell.score
+        rows.append(f"| {hp.name} | {hp.position_name} | {hp.team_short} | "
+                    f"{hp.cost_m:.1f} | {share*100:.0f}% | {sell.name} "
+                    f"(£{sell.cost_m:.1f}m) | {delta:+.1f} |")
+    out.append("\n".join(rows))
+    out.append("")
+    out.append("_Δ score is the projected-points change over the horizon — a "
+               "small/negative Δ can still be worth it purely to cover rank risk._")
+    out.append("")
+    return "\n".join(out)
 
 
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
@@ -462,13 +539,20 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--free-transfers", type=int, default=1,
                         help="your free transfers this week (the public API can't "
                              "report this reliably; default 1)")
+    parser.add_argument("--no-template", action="store_true",
+                        help="skip the elite-ownership template-holes section "
+                             "(faster; avoids reading top managers' squads)")
+    parser.add_argument("--top", type=int, default=TEMPLATE_TOP_N,
+                        help=f"how many top managers to read for template holes "
+                             f"(default {TEMPLATE_TOP_N})")
     parser.add_argument("--offline", action="store_true",
                         help="use the cached ./data snapshot instead of fetching live")
     args = parser.parse_args(argv)
 
     try:
         digest = build_digest(team_id=args.team_id, horizon=args.horizon,
-                              free_transfers=args.free_transfers, offline=args.offline)
+                              free_transfers=args.free_transfers, offline=args.offline,
+                              use_template=not args.no_template, template_top_n=args.top)
     except (RuntimeError, opt.OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

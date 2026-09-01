@@ -43,6 +43,10 @@ TEMPLATE_TOP_N = 50       # how many top managers to read elite ownership from
 # a premium doesn't have to stay every week if you rate the incoming pick.
 PREMIUM_SELL = 80
 FULL_SQUAD = 15
+# A benched player must out-project a same-position starter by at least this many
+# projected points before we tell you to start them — lineup changes are free
+# (no transfer), so the bar is low, but not zero to avoid churn on ties.
+LINEUP_MIN_EDGE = 4.0
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -152,6 +156,68 @@ def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
         costly = sell.cost >= PREMIUM_SELL
         result.append((hp, share, sell, costly))
     return result
+
+
+def lineup_check(picks: dict, by_id: dict):
+    """Compare your set XI against your bench on projected score. FPL encodes
+    the XI as pick positions 1-11 and the bench as 12-15 (in autosub order).
+    Returns (swaps, bench_order):
+      - swaps: [(bench_player, starter_player, edge)] where a benched player
+        out-projects a *same-position* starter — always a formation-legal, free
+        swap you should make (biggest edge first);
+      - bench_order: the recommended outfield sub order (best-projected first)
+        when it differs from how the bench is currently ordered, else []."""
+    starters, bench = [], []
+    for pk in picks.get("picks", []):
+        p = by_id.get(pk["element"])
+        if p is None:
+            continue
+        (starters if pk.get("position", 99) <= 11 else bench).append(
+            (pk.get("position", 99), p))
+    swaps = []
+    for _, b in bench:
+        same = [s for _, s in starters if s.position == b.position]
+        if not same:
+            continue
+        weakest = min(same, key=lambda s: s.score)
+        edge = b.score - weakest.score
+        if edge >= LINEUP_MIN_EDGE:
+            swaps.append((b, weakest, edge))
+    swaps.sort(key=lambda t: -t[2])
+    # Outfield subs (GK excluded) should be strongest-projected first for autosubs.
+    bench_out = [p for _, p in sorted(bench, key=lambda t: t[0]) if p.position != 1]
+    bench_sorted = sorted(bench_out, key=lambda p: -p.score)
+    bench_order = bench_sorted if [p.id for p in bench_out] != \
+        [p.id for p in bench_sorted] else []
+    return swaps, bench_order
+
+
+def _render_lineup(swaps, bench_order) -> str:
+    out = ["## Starting XI check", ""]
+    if not swaps and not bench_order:
+        out.append("_Your XI already starts your best-projected eleven and your "
+                   "bench is in autosub order — nothing to change._")
+        out.append("")
+        return "\n".join(out)
+    if swaps:
+        out.append("_A player on your bench out-projects one you're starting. "
+                   "This is **free** — no transfer, no hit — so make the swap "
+                   "before the deadline:_")
+        out.append("")
+        rows = ["| Start (from bench) | Over (in XI) | Pos | Δ score |",
+                "|--------------------|--------------|-----|---------|"]
+        for b, s, edge in swaps:
+            rows.append(f"| {b.name} ({b.team_short}) | {s.name} ({s.team_short}) "
+                        f"| {b.position_name} | +{edge:.1f} |")
+        out.append("\n".join(rows))
+        out.append("")
+    if bench_order:
+        order_str = " → ".join(p.name for p in bench_order)
+        out.append(f"_Bench order for autosubs (strongest first): **{order_str}**. "
+                   "Reorder so your best sub comes on first if a starter is a "
+                   "no-show._")
+        out.append("")
+    return "\n".join(out)
 
 
 def performance_summary(history: dict) -> str:
@@ -336,10 +402,12 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
     elo_by_team = opt.map_elo_to_teams(
         fetch_data.get_betting_strength(refresh=not offline, offline=offline),
         bootstrap["teams"])
+    strength_source = "Betting odds"
     if not elo_by_team:
         elo_by_team = opt.map_elo_to_teams(
             fetch_data.get_club_elo(refresh=not offline, offline=offline),
             bootstrap["teams"])
+        strength_source = "ClubElo" if elo_by_team else "FPL/neutral"
 
     players = opt.build_players(bootstrap, fixtures, horizon, last_season, weight,
                                elo_by_team=elo_by_team)
@@ -389,6 +457,10 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
             "\n".join(chip_lines) if chip_lines else
             "_No chips available._") + "\n"
 
+    # Starting XI / bench-order check — free points you may be leaving benched.
+    swaps, bench_order = lineup_check(picks, by_id)
+    lineup_md = _render_lineup(swaps, bench_order)
+
     perf_md = performance_summary(history)
 
     price_md = ""
@@ -411,7 +483,8 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
                    available_chips, my_players, flagged, captain, vice,
                    current_cap, weight, horizon, el_by_id,
                    extra=template_md + "\n" + price_md + "\n" + radar_md + "\n" + chip_md,
-                   perf_md=perf_md)
+                   perf_md=perf_md, lineup_md=lineup_md,
+                   strength_source=strength_source, n_strength=len(elo_by_team))
 
 
 def _render_template(holes, n_elite) -> str:
@@ -450,10 +523,12 @@ def _render_template(holes, n_elite) -> str:
 
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
             my_players, flagged, captain, vice, current_cap, weight, horizon,
-            el_by_id, extra="", perf_md="") -> str:
+            el_by_id, extra="", perf_md="", lineup_md="",
+            strength_source="FPL/neutral", n_strength=0) -> str:
     # Defensive: never let a non-string section crash the whole digest.
     extra = extra if isinstance(extra, str) else ("" if extra is None else str(extra))
     perf_md = perf_md if isinstance(perf_md, str) else ("" if perf_md is None else str(perf_md))
+    lineup_md = lineup_md if isinstance(lineup_md, str) else ""
     name = entry.get("name", "My team")
     order = {1: 0, 2: 1, 3: 2, 4: 3}
     out = [f"# {name} — Gameweek {next_gw} digest", ""]
@@ -466,7 +541,13 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
     out.append(f"**Chips available:** {', '.join(available_chips) or 'none'}  ")
     out.append(f"**Data basis:** last-season weight {weight:.2f} "
                f"(decaying to 0 by GW{opt.DECAY_GWS}) — current form takes over "
-               "as the season runs.")
+               "as the season runs.  ")
+    if n_strength:
+        out.append(f"**Team strength:** {strength_source} ratings for "
+                   f"{n_strength} clubs (forward-looking quality prior).")
+    else:
+        out.append(f"**Team strength:** {strength_source} — external source "
+                   "unreachable, using FPL's own ratings.")
     out.append("")
 
     # Squad overview.
@@ -482,6 +563,11 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
                     f"{p.cost_m:.1f} | {p.score:.1f} | {p.xgi90:.2f} | {fdr} | {watch} |")
     out.append("\n".join(rows))
     out.append("")
+
+    # Starting XI / bench check — free points before any transfer talk.
+    if lineup_md.strip():
+        out.append(lineup_md.rstrip())
+        out.append("")
 
     # Flags + transfer suggestions.
     out.append("## Flags & transfer suggestions")

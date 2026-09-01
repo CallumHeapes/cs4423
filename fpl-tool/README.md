@@ -135,7 +135,13 @@ bank, chips, and current captain, then produces one markdown digest:
 
 0. **Season so far** — last GW points, overall rank + movement, total points,
    squad-value growth, and your best/worst gameweek (a performance scoreboard).
-1. Fixture outlook over the next `--horizon` GWs for every club you own.
+1. Fixture outlook over the next `--horizon` GWs for every club you own, plus a
+   **team-strength line** naming which source loaded (betting odds → ClubElo →
+   FPL/neutral) so you can see the prior the projections are using.
+1b. **Starting XI check** — before any transfer talk, it compares your set XI to
+    your bench and flags, formation-legal and autosub-aware, any benched player
+    who out-projects a same-position starter (a *free* swap, no hit), plus a
+    best-first bench order. Catches points left on the bench.
 2. **Flags** each owned player for bad fixture runs, form dips, price-drop risk
    (heavy net transfers out), or availability (injury/suspension/doubt).
 3. **Budget-matched transfer suggestions** (1–2 per flagged player) — same

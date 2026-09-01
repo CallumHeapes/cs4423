@@ -38,9 +38,10 @@ CHIP_LOOKAHEAD = 15        # gameweeks to scan for blanks / doubles
 BLANK_ALERT = 4            # >= this many of your 15 blanking = a notable blank GW
 ELITE_TEMPLATE = 0.40     # owned by >= this share of top managers = a template pick
 TEMPLATE_TOP_N = 50       # how many top managers to read elite ownership from
-# Don't surface a template hole if funding it would sacrifice a player worth this
-# many more projected points — it isn't a sensible one-move add (needs a wildcard).
-TEMPLATE_MAX_SACRIFICE = -8.0
+# Selling a player at/above this price (£m*10) to fund a template hole is a real
+# sacrifice, not a free upgrade — we flag it so you weigh it, but never hide it:
+# a premium doesn't have to stay every week if you rate the incoming pick.
+PREMIUM_SELL = 80
 FULL_SQUAD = 15
 
 
@@ -127,9 +128,10 @@ def elite_ownership(top_n: int, gw: int) -> tuple[dict[int, float], int]:
 
 def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
     """Elite picks you don't own, that you could afford by selling one of your
-    same-position players. Returns [(hole_player, elite_share, sell_player)],
-    most-owned first. These are rank-protection moves, distinct from the
-    points-based transfer suggestions."""
+    same-position players. Returns [(hole_player, elite_share, sell_player,
+    costly)], most-owned first, where `costly` is True when the funding sale is
+    a premium — a judgment call rather than a clean upgrade, never hidden. These
+    are rank-protection moves, distinct from the points-based suggestions."""
     my_ids = {p.id for p in my_players}
     holes = sorted(((pid, s) for pid, s in elite.items()
                     if s >= ELITE_TEMPLATE and pid not in my_ids),
@@ -143,10 +145,12 @@ def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
         affordable = [q for q in same if q.cost + bank >= hp.cost]
         if not affordable:  # can't fit with one sale — a bigger restructure
             continue
-        sell = min(affordable, key=lambda q: q.score)  # sacrifice the weakest link
-        if hp.score - sell.score < TEMPLATE_MAX_SACRIFICE:
-            continue  # funding it would bin a much better player — needs a wildcard
-        result.append((hp, share, sell))
+        # Fund it with the smallest points sacrifice — the weakest affordable
+        # player. If even that is a premium, the swap costs you real points; we
+        # mark it `costly` and let you decide, rather than pretending it's free.
+        sell = min(affordable, key=lambda q: q.score)
+        costly = sell.cost >= PREMIUM_SELL
+        result.append((hp, share, sell, costly))
     return result
 
 
@@ -327,9 +331,15 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
         ids, refresh=not offline, offline=offline,
         progress=lambda m: print(m, file=sys.stderr))
     weight = opt.weight_for_gw(next_gw)
+    # Team strength: bookmaker odds first (forward-looking), then ClubElo, then
+    # FPL/neutral — the same source the optimizer uses, kept in step.
     elo_by_team = opt.map_elo_to_teams(
-        fetch_data.get_club_elo(refresh=not offline, offline=offline),
+        fetch_data.get_betting_strength(refresh=not offline, offline=offline),
         bootstrap["teams"])
+    if not elo_by_team:
+        elo_by_team = opt.map_elo_to_teams(
+            fetch_data.get_club_elo(refresh=not offline, offline=offline),
+            bootstrap["teams"])
 
     players = opt.build_players(bootstrap, fixtures, horizon, last_season, weight,
                                elo_by_team=elo_by_team)
@@ -417,15 +427,23 @@ def _render_template(holes, n_elite) -> str:
     out.append("")
     rows = ["| Bring in | Pos | Club | £m | Elite% | Fund by selling | Δ score |",
             "|----------|-----|------|----|--------|-----------------|---------|"]
-    for hp, share, sell in holes[:6]:
+    costly_any = False
+    for hp, share, sell, costly in holes[:6]:
         delta = hp.score - sell.score
+        mark = " ⚠" if costly else ""
+        costly_any = costly_any or costly
         rows.append(f"| {hp.name} | {hp.position_name} | {hp.team_short} | "
                     f"{hp.cost_m:.1f} | {share*100:.0f}% | {sell.name} "
-                    f"(£{sell.cost_m:.1f}m) | {delta:+.1f} |")
+                    f"(£{sell.cost_m:.1f}m){mark} | {delta:+.1f} |")
     out.append("\n".join(rows))
     out.append("")
     out.append("_Δ score is the projected-points change over the horizon — a "
                "small/negative Δ can still be worth it purely to cover rank risk._")
+    if costly_any:
+        out.append("")
+        out.append("_⚠ funding this sells a premium, so the model has it costing "
+                   "you points — a judgment call, not a free upgrade. Worth it if "
+                   "you rate the incoming pick over the one you'd drop._")
     out.append("")
     return "\n".join(out)
 

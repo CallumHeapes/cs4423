@@ -57,7 +57,8 @@ def _f(v, default: float = 0.0) -> float:
 
 
 def _cap_key(p: opt.Player) -> float:
-    return p.attack_pts * p.attack_ease * p.n_fixtures
+    # This week's captaincy value — the actual next opponent, not a 5-GW average.
+    return opt.captain_score(p)
 
 
 def flag_reasons(p: opt.Player, el: dict, horizon: int) -> list[str]:
@@ -441,7 +442,9 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
             price_watch.append(p)
 
     # Captain: best attacking threat among my mids/forwards.
-    cap_pool = [p for p in my_players if p.position in (3, 4)] or my_players
+    # Captain on this week's fixture; never a player who blanks the upcoming GW.
+    cap_pool = [p for p in my_players if p.position in (3, 4) and p.next_n] or \
+               [p for p in my_players if p.position in (3, 4)] or my_players
     captain = max(cap_pool, key=_cap_key)
     vice_pool = [p for p in cap_pool if p.team_id != captain.team_id] or \
                 [p for p in cap_pool if p.id != captain.id]
@@ -619,15 +622,31 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
     out.append("")
     cur = next((p for p in my_players if p.id == current_cap), None)
     if cur and cur.id != captain.id:
-        out.append(f"- Your current captain is **{cur.name}**; the model prefers "
-                   f"**{captain.name}** this week.")
-    out.append(f"- **Captain: {captain.name} ({captain.team_short})** — top "
-               f"attacking threat (xGI/90 {captain.xgi90:.2f}, {captain.n_fixtures} "
-               f"fixtures"
-               + (f", avg FDR {captain.avg_fdr:.1f}" if captain.avg_fdr else "")
+        cur_fix = f" ({cur.next_opp})" if cur.next_opp else ""
+        out.append(f"- Your current captain is **{cur.name}**{cur_fix}; the model "
+                   f"prefers **{captain.name}** on this week's fixture.")
+    cap_fix = f" vs {captain.next_opp}" if captain.next_opp else ""
+    out.append(f"- **Captain: {captain.name} ({captain.team_short})**{cap_fix} — "
+               f"best this-week fixture (xGI/90 {captain.xgi90:.2f}, ease "
+               f"{captain.next_attack_ease:.2f}×"
                + (", on penalties" if captain.is_pen_taker else "") + ").")
-    out.append(f"- **Vice: {vice.name} ({vice.team_short})** — backup threat from "
-               "a different club.")
+    out.append(f"- **Vice: {vice.name} ({vice.team_short})"
+               + (f" vs {vice.next_opp}" if vice.next_opp else "") + "** — backup "
+               "threat from a different club.")
+    # Ranked shortlist so a big-name pick with a hard fixture is visibly demoted.
+    ranked = sorted([p for p in my_players if p.position in (3, 4)],
+                    key=_cap_key, reverse=True)[:4]
+    if len(ranked) > 1:
+        out.append("")
+        out.append("_This week's armband options (attacking threat × the actual "
+                   "fixture — higher ease = softer opponent):_")
+        out.append("")
+        out.append("| Player | Fixture | xGI/90 | Fixture ease |")
+        out.append("|--------|---------|--------|--------------|")
+        for p in ranked:
+            fx = p.next_opp or "blank"
+            ease = f"{p.next_attack_ease:.2f}×" if p.next_n else "— (blank)"
+            out.append(f"| {p.name} ({p.team_short}) | {fx} | {p.xgi90:.2f} | {ease} |")
     out.append("")
 
     if extra.strip():

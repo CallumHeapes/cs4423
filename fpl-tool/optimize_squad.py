@@ -246,6 +246,12 @@ class Player:
     status: str
     news: str
     selected_by: float
+    # Upcoming-GW-only fixture info (captaincy / this-week lineup calls).
+    next_attack_ease: float = 0.0
+    next_cs_ease: float = 0.0
+    next_fdr: float | None = None
+    next_opp: str = ""
+    next_n: int = 0
     is_pen_taker: bool = False
     is_setpiece: bool = False
     risky: bool = False
@@ -288,6 +294,22 @@ class TeamOutlook:
     cs_ease: float         # >1 == weak opponent attacks (good for clean sheets)
     gen_ease: float        # FDR-based general multiplier
     opponents: list[str]   # e.g. ["ARS (H)", "bou (A)", ...]
+    # The *upcoming* GW alone (for one-week bets like captaincy, which a 5-GW
+    # average blurs). Summed across the GW so a double counts twice; 0 on a blank.
+    next_n: int = 0
+    next_attack_ease: float = 0.0
+    next_cs_ease: float = 0.0
+    next_fdr: float | None = None
+    next_opp: str = ""     # "MCI (A)" or "MCI (A), BOU (H)" in a double GW
+
+
+def captain_score(p: "Player") -> float:
+    """This-week captaincy value: attacking threat × the *actual* upcoming-GW
+    fixture ease, summed over a double GW and 0 on a blank. Unlike `score` (a
+    5-GW hold value used for transfers), captaincy is a single-week bet, so it
+    must price the real next opponent — not a 5-game average that blurs a hard
+    fixture (e.g. away to a top defence) into the mean."""
+    return p.attack_pts * (p.next_attack_ease if p.next_n else 0.0)
 
 
 def _fdr_multiplier(difficulty: int) -> float:
@@ -321,6 +343,7 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
     upcoming = sorted({f["event"] for f in fixtures
                        if f["event"] is not None and not f.get("finished")})[:horizon]
     horizon_events = set(upcoming)
+    global_next = upcoming[0] if upcoming else None  # the GW you captain into
 
     acc: dict[int, dict] = {}
     for f in fixtures:
@@ -339,19 +362,28 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
             attack_ease = _safe_ease(avg_def, opp_def)
             cs_ease = _safe_ease(avg_att, opp_att)
             rec = acc.setdefault(team_id, {"fdr": [], "att": [], "cs": [],
-                                           "gen": [], "opp": []})
+                                           "gen": [], "opp": [], "ev": []})
             rec["fdr"].append(diff)
             rec["att"].append(attack_ease)
             rec["cs"].append(cs_ease)
             rec["gen"].append(_fdr_multiplier(diff))
+            rec["ev"].append(f["event"])
             venue = "H" if is_home else "A"
             rec["opp"].append(f"{opp.get('short_name', '?')} ({venue})")
 
     outlook: dict[int, TeamOutlook] = {}
     for team_id, rec in acc.items():
         n = len(rec["fdr"])
+        # Isolate just the upcoming GW's fixture(s) for one-week bets. A team
+        # that blanks the upcoming GW has no such fixtures -> next_n 0.
+        nx = [i for i, e in enumerate(rec["ev"]) if e == global_next]
         outlook[team_id] = TeamOutlook(
             n_fixtures=n,
+            next_n=len(nx),
+            next_attack_ease=sum(rec["att"][i] for i in nx),
+            next_cs_ease=sum(rec["cs"][i] for i in nx),
+            next_fdr=(sum(rec["fdr"][i] for i in nx) / len(nx)) if nx else None,
+            next_opp=", ".join(rec["opp"][i] for i in nx),
             avg_fdr=sum(rec["fdr"]) / n if n else None,
             attack_ease=sum(rec["att"]) / n if n else 1.0,
             cs_ease=sum(rec["cs"]) / n if n else 1.0,
@@ -571,6 +603,11 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
             attack_pts=attack_pts, cs_pts=cs_pts, xgi90=xgi90,
             n_fixtures=n_fix, avg_fdr=ot.avg_fdr if ot else None,
             attack_ease=attack_ease, cs_ease=cs_ease,
+            next_attack_ease=(ot.next_attack_ease if ot else 0.0),
+            next_cs_ease=(ot.next_cs_ease if ot else 0.0),
+            next_fdr=(ot.next_fdr if ot else None),
+            next_opp=(ot.next_opp if ot else ""),
+            next_n=(ot.next_n if ot else 0),
             chance=chance, status=el.get("status", "a"), news=news,
             selected_by=selected_by, is_pen_taker=is_pen, is_setpiece=is_sp,
             risky=risky, differential=selected_by < DIFF_OWNERSHIP,
@@ -769,14 +806,14 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
     bench_ordered = bench_gk + bench_out
 
     # Captain/vice: attacking ceiling only (goals & assists win armbands), and
-    # only midfielders/forwards — you never captain a defender or keeper.
-    def _cap_key(p: Player) -> float:
-        return p.attack_pts * p.attack_ease * p.n_fixtures
-    cap_pool = [p for p in xi if p.position in (3, 4)] or xi
-    captain = max(cap_pool, key=_cap_key)
-    other_club = [p for p in cap_pool if p.team_id != captain.team_id]
-    vice = max(other_club or [p for p in cap_pool if p.id != captain.id],
-               key=_cap_key)
+    # only midfielders/forwards — you never captain a defender or keeper. Ranked
+    # on this week's actual fixture, and never a player who blanks the upcoming GW.
+    playing = [p for p in xi if p.position in (3, 4) and p.next_n] or \
+              [p for p in xi if p.position in (3, 4)] or xi
+    captain = max(playing, key=captain_score)
+    other_club = [p for p in playing if p.team_id != captain.team_id]
+    vice = max(other_club or [p for p in playing if p.id != captain.id],
+               key=captain_score)
 
     total_cost = sum(p.cost for p in squad)
     bank = budget - total_cost
@@ -842,11 +879,10 @@ def build_report(squad: list[Player], xi: list[Player], all_players: list[Player
 
     out.append("## Captaincy")
     out.append("")
-    cap_fix = f", avg FDR {captain.avg_fdr:.1f}" if captain.avg_fdr else ""
-    out.append(f"- **Captain: {captain.name} ({captain.team_short})** — highest "
-               f"attacking threat in the XI (xGI/90 {captain.xgi90:.2f}, "
-               f"{captain.n_fixtures} fixtures{cap_fix}, attack ease "
-               f"{captain.attack_ease:.2f}×)"
+    cap_fix = (f" vs {captain.next_opp}" if captain.next_opp else "")
+    out.append(f"- **Captain: {captain.name} ({captain.team_short})**{cap_fix} — "
+               f"highest this-week threat (xGI/90 {captain.xgi90:.2f}, fixture "
+               f"ease {captain.next_attack_ease:.2f}×)"
                + (" — on penalties." if captain.is_pen_taker else "."))
     out.append(f"- **Vice-captain: {vice.name} ({vice.team_short})** — next-best "
                "threat from a different club, so a single blank can't sink both.")

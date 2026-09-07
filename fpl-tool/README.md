@@ -158,7 +158,12 @@ bank, chips, and current captain, then produces one markdown digest:
     if you rate the incoming pick) — you decide. Skip with `--no-template`; size
     with `--top`. Price drops sit in a separate "Price watch (value only)" note,
     never as a sell signal.
-5. **Captain / vice** for the upcoming GW on attacking threat + fixtures.
+5. **Captain / vice** for the upcoming GW — ranked on attacking threat × the
+   **actual next fixture** (the real opponent's defensive strength, home/away),
+   *not* a 5-GW average, so a big name facing a top defence away is correctly
+   demoted below a lesser pick at home to a weak side. Doubles count twice; a
+   player who blanks the upcoming GW is never captained. Shows the shortlist so
+   you can see why each option ranks where it does.
 6. A **fixture radar** — which of your players **blank** (0 fixtures) or
    **double** (2+) in each upcoming GW, once cup rounds create them mid-season.
 7. A **chip watch** — when to play each still-available chip: Bench Boost and

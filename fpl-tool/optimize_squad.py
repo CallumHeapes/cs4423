@@ -436,8 +436,13 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
         outlook[team_id] = TeamOutlook(
             n_fixtures=n,
             next_n=len(nx),
-            next_attack_ease=sum(rec["att"][i] for i in nx),
-            next_cs_ease=sum(rec["cs"][i] for i in nx),
+            # Blend the actual next-fixture FDR into the one-week ease, so
+            # captaincy/lineup still discriminate when FPL's team strengths are
+            # flat/unpublished (as deep pre-season or in this dataset). FDR is
+            # always present and is the difficulty the FPL app itself shows.
+            # Summed per fixture so a double GW counts twice; 0 on a blank.
+            next_attack_ease=sum(rec["att"][i] * rec["gen"][i] for i in nx),
+            next_cs_ease=sum(rec["cs"][i] * rec["gen"][i] for i in nx),
             next_fdr=(sum(rec["fdr"][i] for i in nx) / len(nx)) if nx else None,
             next_opp=", ".join(rec["opp"][i] for i in nx),
             avg_fdr=sum(rec["fdr"]) / n if n else None,   # plain mean (display)

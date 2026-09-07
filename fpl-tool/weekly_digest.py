@@ -653,14 +653,16 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
     if len(ranked) > 1:
         out.append("")
         out.append("_This week's armband options (attacking threat × the actual "
-                   "fixture — higher ease = softer opponent):_")
+                   "fixture — higher ease = softer opponent, lower FDR = easier):_")
         out.append("")
-        out.append("| Player | Fixture | xGI/90 | Fixture ease |")
-        out.append("|--------|---------|--------|--------------|")
+        out.append("| Player | Fixture | FDR | xGI/90 | Fixture ease |")
+        out.append("|--------|---------|-----|--------|--------------|")
         for p in ranked:
             fx = p.next_opp or "blank"
+            fdr = f"{p.next_fdr:.0f}" if (p.next_n and p.next_fdr) else "—"
             ease = f"{p.next_attack_ease:.2f}×" if p.next_n else "— (blank)"
-            out.append(f"| {p.name} ({p.team_short}) | {fx} | {p.xgi90:.2f} | {ease} |")
+            out.append(f"| {p.name} ({p.team_short}) | {fx} | {fdr} | "
+                       f"{p.xgi90:.2f} | {ease} |")
     out.append("")
 
     if extra.strip():

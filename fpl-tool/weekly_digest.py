@@ -27,6 +27,11 @@ import optimize_squad as opt
 FDR_BAD = 3.4              # avg fixture difficulty over the horizon
 FORM_DIP_REL = 1.5        # form this far below season PPG = a dip
 PRICE_DROP_NET = 40000    # net transfers out (this GW) that hints at a price drop
+# Rotation risk: a fit player averaging fewer than this many minutes per GW so
+# far is playing but not nailed (rotated / a sub at a new club). Needs a few GWs
+# of data first — it can't judge a fresh signing with no minutes yet.
+ROTATION_MINS_PER_GW = 60
+ROTATION_MIN_SAMPLE = 3
 # A suggested transfer must beat the player it replaces by at least this much
 # projected score (over the horizon) to be worth showing — filters trivial swaps.
 MIN_SUGGEST_GAIN = 6.0
@@ -44,9 +49,10 @@ TEMPLATE_TOP_N = 50       # how many top managers to read elite ownership from
 PREMIUM_SELL = 80
 FULL_SQUAD = 15
 # A benched player must out-project a same-position starter by at least this many
-# projected points before we tell you to start them — lineup changes are free
-# (no transfer), so the bar is low, but not zero to avoid churn on ties.
-LINEUP_MIN_EDGE = 4.0
+# *this-week* expected points (opt.week_score scale, not the 5-GW score) before
+# we tell you to start them — lineup changes are free (no transfer), so the bar
+# is low, but not zero to avoid churn on ties.
+LINEUP_MIN_EDGE = 1.5
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -61,7 +67,8 @@ def _cap_key(p: opt.Player) -> float:
     return opt.captain_score(p)
 
 
-def flag_reasons(p: opt.Player, el: dict, horizon: int) -> list[str]:
+def flag_reasons(p: opt.Player, el: dict, horizon: int,
+                 current_gw: int | None = None) -> list[str]:
     """Genuine *points* reasons to consider moving this player. Price drops are
     a value signal, not a points one, so they are handled separately (see
     price_drop_risk) and never trigger a transfer suggestion on their own."""
@@ -75,6 +82,17 @@ def flag_reasons(p: opt.Player, el: dict, horizon: int) -> list[str]:
         reasons.append(f"availability: {news or label}")
     elif chance is not None and chance < 75:
         reasons.append(f"availability: {chance}% to play")
+
+    # Rotation risk: fit and featuring, but averaging low minutes (a sub / rotated,
+    # e.g. after a move). Distinct from an injury flag; needs a few GWs of sample.
+    if (status == "a" and not reasons and current_gw
+            and current_gw >= ROTATION_MIN_SAMPLE):
+        mins = _f(el.get("minutes"))
+        starts = int(_f(el.get("starts")))
+        if 0 < mins < ROTATION_MINS_PER_GW * current_gw:
+            reasons.append(f"rotation risk (~{mins / current_gw:.0f} mins/GW, "
+                           f"{starts} start{'s' if starts != 1 else ''} in "
+                           f"{current_gw} GWs)")
 
     if p.avg_fdr and p.avg_fdr >= FDR_BAD:
         reasons.append(f"tough run (avg FDR {p.avg_fdr:.1f} over next {horizon})")
@@ -175,19 +193,22 @@ def lineup_check(picks: dict, by_id: dict):
             continue
         (starters if pk.get("position", 99) <= 11 else bench).append(
             (pk.get("position", 99), p))
+    # Rank on this week's expected points (actual fixture + availability), not the
+    # 5-GW hold value — starting is a one-week call, and an injured bench player
+    # must never be recommended over a fit starter (week_score prices both in).
     swaps = []
     for _, b in bench:
         same = [s for _, s in starters if s.position == b.position]
         if not same:
             continue
-        weakest = min(same, key=lambda s: s.score)
-        edge = b.score - weakest.score
+        weakest = min(same, key=opt.week_score)
+        edge = opt.week_score(b) - opt.week_score(weakest)
         if edge >= LINEUP_MIN_EDGE:
             swaps.append((b, weakest, edge))
     swaps.sort(key=lambda t: -t[2])
-    # Outfield subs (GK excluded) should be strongest-projected first for autosubs.
+    # Outfield subs (GK excluded) should be strongest this week first for autosubs.
     bench_out = [p for _, p in sorted(bench, key=lambda t: t[0]) if p.position != 1]
-    bench_sorted = sorted(bench_out, key=lambda p: -p.score)
+    bench_sorted = sorted(bench_out, key=lambda p: -opt.week_score(p))
     bench_order = bench_sorted if [p.id for p in bench_out] != \
         [p.id for p in bench_sorted] else []
     return swaps, bench_order
@@ -398,17 +419,10 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
         ids, refresh=not offline, offline=offline,
         progress=lambda m: print(m, file=sys.stderr))
     weight = opt.weight_for_gw(next_gw)
-    # Team strength: bookmaker odds first (forward-looking), then ClubElo, then
-    # FPL/neutral — the same source the optimizer uses, kept in step.
-    elo_by_team = opt.map_elo_to_teams(
-        fetch_data.get_betting_strength(refresh=not offline, offline=offline),
-        bootstrap["teams"])
-    strength_source = "Betting odds"
-    if not elo_by_team:
-        elo_by_team = opt.map_elo_to_teams(
-            fetch_data.get_club_elo(refresh=not offline, offline=offline),
-            bootstrap["teams"])
-        strength_source = "ClubElo" if elo_by_team else "FPL/neutral"
+    # Team strength: betting odds -> ClubElo -> last-good (survives a Colab
+    # re-clone) -> FPL/neutral — the same resolver the optimizer uses.
+    elo_by_team, strength_source = opt.load_team_strength(
+        bootstrap, offline=offline)
 
     players = opt.build_players(bootstrap, fixtures, horizon, last_season, weight,
                                elo_by_team=elo_by_team)
@@ -434,7 +448,7 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
     flagged = []
     price_watch = []
     for p in my_players:
-        reasons = flag_reasons(p, el_by_id.get(p.id, {}), horizon)
+        reasons = flag_reasons(p, el_by_id.get(p.id, {}), horizon, current_gw)
         if reasons:
             flagged.append((p, reasons, suggest_replacements(
                 p, players, my_ids, bank, club_counts)))

@@ -88,6 +88,10 @@ CS_PROB_CLAMP = (0.05, 0.70)
 # Fixture ease multipliers are clamped so no single fixture dominates.
 EASE_CLAMP = (0.70, 1.30)
 FIX_SENSITIVITY = 0.15     # FDR-based general multiplier sensitivity
+# Weight nearer gameweeks more when averaging fixture ease over the horizon, so a
+# strong immediate run isn't diluted by soft games four weeks out (and vice
+# versa). Weight of the k-th upcoming GW = HORIZON_DECAY**k (k=0 is next).
+HORIZON_DECAY = 0.85
 
 # Team-quality prior: an attacker in a weak team creates/finishes fewer chances,
 # so scale attacking output by the player's OWN team attack strength vs the
@@ -252,6 +256,7 @@ class Player:
     next_fdr: float | None = None
     next_opp: str = ""
     next_n: int = 0
+    minutes_mult: float = 1.0   # availability/minutes-security factor (0..1)
     is_pen_taker: bool = False
     is_setpiece: bool = False
     risky: bool = False
@@ -303,13 +308,57 @@ class TeamOutlook:
     next_opp: str = ""     # "MCI (A)" or "MCI (A), BOU (H)" in a double GW
 
 
+def load_team_strength(bootstrap: dict, *, offline: bool, use_elo: bool = True
+                       ) -> tuple[dict[int, float], str]:
+    """Resolve a per-team strength prior, returning (by_team_id, source_label).
+
+    Order: live betting odds -> ClubElo -> last-good persisted strength (survives
+    a Colab re-clone) -> {} (the caller then falls back to FPL's own ratings). A
+    successful live pull is persisted so a later outage can reuse it."""
+    if not use_elo:
+        return {}, "FPL/neutral"
+    teams = bootstrap["teams"]
+    odds = fetch_data.get_betting_strength(refresh=not offline, offline=offline)
+    by_team = map_elo_to_teams(odds, teams)
+    if by_team:
+        fetch_data.save_strength_state("Betting odds", odds)
+        return by_team, "Betting odds"
+    elo = fetch_data.get_club_elo(refresh=not offline, offline=offline)
+    by_team = map_elo_to_teams(elo, teams)
+    if by_team:
+        fetch_data.save_strength_state("ClubElo", elo)
+        return by_team, "ClubElo"
+    # Both live sources down — reuse the last good pull if we have one.
+    saved = fetch_data.load_strength_state()
+    if saved and saved.get("strength"):
+        by_team = map_elo_to_teams(saved["strength"], teams)
+        if by_team:
+            return by_team, f"{saved.get('source', '?')} (cached {saved.get('saved', '?')})"
+    return {}, "FPL/neutral"
+
+
 def captain_score(p: "Player") -> float:
     """This-week captaincy value: attacking threat × the *actual* upcoming-GW
-    fixture ease, summed over a double GW and 0 on a blank. Unlike `score` (a
-    5-GW hold value used for transfers), captaincy is a single-week bet, so it
+    fixture ease, summed over a double GW and 0 on a blank, and tempered by
+    availability so a doubtful/injured player is never captained. Unlike `score`
+    (a 5-GW hold value used for transfers), captaincy is a single-week bet, so it
     must price the real next opponent — not a 5-game average that blurs a hard
     fixture (e.g. away to a top defence) into the mean."""
-    return p.attack_pts * (p.next_attack_ease if p.next_n else 0.0)
+    if not p.next_n:
+        return 0.0
+    return p.attack_pts * p.next_attack_ease * p.minutes_mult
+
+
+def week_score(p: "Player") -> float:
+    """One-week expected points across attack + clean sheets, priced on the
+    *actual* upcoming fixture and tempered by availability. 0 on a blank; a
+    double GW counts twice. Used for weekly lineup calls (who to start), where
+    the 5-GW hold `score` is the wrong yardstick — and where an injured player
+    must never be recommended to start over a fit one."""
+    if not p.next_n:
+        return 0.0
+    return (p.attack_pts * p.next_attack_ease
+            + p.cs_pts * p.next_cs_ease) * p.minutes_mult
 
 
 def _fdr_multiplier(difficulty: int) -> float:
@@ -344,6 +393,13 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
                        if f["event"] is not None and not f.get("finished")})[:horizon]
     horizon_events = set(upcoming)
     global_next = upcoming[0] if upcoming else None  # the GW you captain into
+    # Nearer GWs carry more weight in the horizon averages (see HORIZON_DECAY).
+    ev_weight = {e: HORIZON_DECAY ** i for i, e in enumerate(upcoming)}
+
+    def _wmean(vals, evs, default):
+        w = [ev_weight.get(e, 0.0) for e in evs]
+        tw = sum(w)
+        return sum(v * wi for v, wi in zip(vals, w)) / tw if tw else default
 
     acc: dict[int, dict] = {}
     for f in fixtures:
@@ -384,10 +440,10 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
             next_cs_ease=sum(rec["cs"][i] for i in nx),
             next_fdr=(sum(rec["fdr"][i] for i in nx) / len(nx)) if nx else None,
             next_opp=", ".join(rec["opp"][i] for i in nx),
-            avg_fdr=sum(rec["fdr"]) / n if n else None,
-            attack_ease=sum(rec["att"]) / n if n else 1.0,
-            cs_ease=sum(rec["cs"]) / n if n else 1.0,
-            gen_ease=sum(rec["gen"]) / n if n else 1.0,
+            avg_fdr=sum(rec["fdr"]) / n if n else None,   # plain mean (display)
+            attack_ease=_wmean(rec["att"], rec["ev"], 1.0),  # near-weighted (score)
+            cs_ease=_wmean(rec["cs"], rec["ev"], 1.0),
+            gen_ease=_wmean(rec["gen"], rec["ev"], 1.0),
             opponents=rec["opp"],
         )
     return outlook
@@ -608,6 +664,7 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
             next_fdr=(ot.next_fdr if ot else None),
             next_opp=(ot.next_opp if ot else ""),
             next_n=(ot.next_n if ot else 0),
+            minutes_mult=minutes_mult,
             chance=chance, status=el.get("status", "a"), news=news,
             selected_by=selected_by, is_pen_taker=is_pen, is_setpiece=is_sp,
             risky=risky, differential=selected_by < DIFF_OWNERSHIP,
@@ -989,28 +1046,12 @@ def run(*, budget_m: float, max_player_cost_m: float, horizon: int,
             print(f"Last-season stats loaded for {len(last_season)} players.",
                   file=sys.stderr)
 
-    elo_by_team: dict[int, float] = {}
-    strength_source = "ClubElo"
-    if use_elo:
-        # Primary: bookmaker match odds (forward-looking, prices quality/form
-        # before FPL updates its own strengths). Fall back to ClubElo, then FPL.
-        odds_names = fetch_data.get_betting_strength(
-            refresh=not offline, offline=offline)
-        elo_by_team = map_elo_to_teams(odds_names, bootstrap["teams"])
-        if elo_by_team:
-            strength_source = "Betting odds"
-            print(f"Betting-odds team strength loaded for {len(elo_by_team)} "
-                  "clubs.", file=sys.stderr)
-        else:
-            elo_names = fetch_data.get_club_elo(
-                refresh=not offline, offline=offline)
-            elo_by_team = map_elo_to_teams(elo_names, bootstrap["teams"])
-            if elo_by_team:
-                print(f"ClubElo team ratings loaded for {len(elo_by_team)} "
-                      "clubs.", file=sys.stderr)
-            elif elo_names or odds_names:
-                print("Team-strength source fetched rows but none mapped to FPL "
-                      "teams — check name aliases.", file=sys.stderr)
+    # Team strength: betting odds -> ClubElo -> last-good (survives re-clone) -> FPL.
+    elo_by_team, strength_source = load_team_strength(
+        bootstrap, offline=offline, use_elo=use_elo)
+    if elo_by_team:
+        print(f"{strength_source} team strength loaded for {len(elo_by_team)} "
+              "clubs.", file=sys.stderr)
 
     fade_ids = resolve_team_tokens(fade, bootstrap["teams"])
     if fade_ids:

@@ -63,6 +63,7 @@ CS_BASE_PROB = 0.32
 CS_PROB_CLAMP = (0.05, 0.70)
 EASE_CLAMP = (0.70, 1.30)
 FIX_SENSITIVITY = 0.15
+HORIZON_DECAY = 0.85       # nearer GWs weigh more in the horizon averages
 DIFF_OWNERSHIP = 10.0
 # Team-quality prior: temper attacking output by the player's OWN team attack
 # strength vs the league average (a no-op until FPL publishes strength ratings,
@@ -322,9 +323,17 @@ def team_outlook(fixtures, teams, horizon):
     def ease(league_avg, opp):
         return 1.0 if (not league_avg or not opp) else _clamp(league_avg / opp, *EASE_CLAMP)
 
-    events = sorted({f["event"] for f in fixtures
-                     if f["event"] is not None and not f.get("finished")})[:horizon]
-    events = set(events)
+    events_sorted = sorted({f["event"] for f in fixtures
+                            if f["event"] is not None and not f.get("finished")})[:horizon]
+    events = set(events_sorted)
+    # Nearer GWs weigh more in the horizon averages (kept in step with the module).
+    ev_weight = {e: HORIZON_DECAY ** i for i, e in enumerate(events_sorted)}
+
+    def wmean(vals, evs, default):
+        w = [ev_weight.get(e, 0.0) for e in evs]
+        tw = sum(w)
+        return sum(v * wi for v, wi in zip(vals, w)) / tw if tw else default
+
     acc = {}
     for f in fixtures:
         if f["event"] not in events:
@@ -338,19 +347,21 @@ def team_outlook(fixtures, teams, horizon):
                               else "strength_defence_home") or avg_def
             opp_att = opp.get("strength_attack_away" if home
                               else "strength_attack_home") or avg_att
-            rec = acc.setdefault(tid, {"fdr": [], "att": [], "cs": [], "gen": [], "opp": []})
+            rec = acc.setdefault(tid, {"fdr": [], "att": [], "cs": [], "gen": [],
+                                       "opp": [], "ev": []})
             rec["fdr"].append(diff)
             rec["att"].append(ease(avg_def, opp_def))
             rec["cs"].append(ease(avg_att, opp_att))
             rec["gen"].append(fdr_multiplier(diff))
+            rec["ev"].append(f["event"])
             rec["opp"].append(f"{opp.get('short_name', '?')} ({'H' if home else 'A'})")
     out = {}
     for tid, rec in acc.items():
         n = len(rec["fdr"])
         out[tid] = {"n": n, "fdr": sum(rec["fdr"]) / n if n else None,
-                    "att": sum(rec["att"]) / n if n else 1.0,
-                    "cs": sum(rec["cs"]) / n if n else 1.0,
-                    "gen": sum(rec["gen"]) / n if n else 1.0, "opp": rec["opp"]}
+                    "att": wmean(rec["att"], rec["ev"], 1.0),
+                    "cs": wmean(rec["cs"], rec["ev"], 1.0),
+                    "gen": wmean(rec["gen"], rec["ev"], 1.0), "opp": rec["opp"]}
     return out, avg_def
 
 

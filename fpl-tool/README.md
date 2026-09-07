@@ -65,8 +65,12 @@ What it does:
 2. **Opponent analysis** per team over the next `--horizon` gameweeks
    (default 5): each fixture is weighted by the *opponent's* strength — attack
    ease (weak opponent defences → more goals) and clean-sheet ease (weak
-   opponent attacks → more clean sheets) — plus FDR. Double gameweeks and
-   blanks fall out naturally.
+   opponent attacks → more clean sheets) — plus FDR. **Nearer gameweeks weigh
+   more** (exponential decay), so a strong immediate run isn't diluted by soft
+   games four weeks out. Double gameweeks and blanks fall out naturally. The
+   team-strength prior is also **persisted outside the repo**, so a transient
+   betting-odds/ClubElo outage reuses the last good pull instead of collapsing
+   to neutral (important on Colab, where each run re-clones and wipes `./data`).
 3. **Scores every player on expected FPL points**, not just price:
    - **Last season pooled with current** (via each player's `history_past`):
      pre-season the goals/assists/clean-sheet rates come from last season's real
@@ -137,13 +141,17 @@ bank, chips, and current captain, then produces one markdown digest:
    squad-value growth, and your best/worst gameweek (a performance scoreboard).
 1. Fixture outlook over the next `--horizon` GWs for every club you own, plus a
    **team-strength line** naming which source loaded (betting odds → ClubElo →
-   FPL/neutral) so you can see the prior the projections are using.
+   last-good cache → FPL/neutral) so you can see the prior the projections use.
 1b. **Starting XI check** — before any transfer talk, it compares your set XI to
-    your bench and flags, formation-legal and autosub-aware, any benched player
-    who out-projects a same-position starter (a *free* swap, no hit), plus a
-    best-first bench order. Catches points left on the bench.
+    your bench on **this week's** expected points (the actual fixture *and*
+    availability, not the 5-GW hold value), and flags any formation-legal,
+    same-position swap where a benched player beats a starter (a *free* change,
+    no hit), plus a best-first bench order. An injured/doubtful bench player is
+    never suggested to start over a fit one. Catches points left on the bench.
 2. **Flags** each owned player for bad fixture runs, form dips, price-drop risk
-   (heavy net transfers out), or availability (injury/suspension/doubt).
+   (heavy net transfers out), availability (injury/suspension/doubt), or
+   **rotation risk** (fit but averaging low minutes — a sub or rotated after a
+   move; needs a few GWs of data first, so it can't judge a fresh signing).
 3. **Budget-matched transfer suggestions** (1–2 per flagged player) — same
    position, affordable from your sale value + bank, rule-legal (max 3/club),
    ranked by projected-points gain.

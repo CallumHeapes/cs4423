@@ -263,6 +263,30 @@ def load_explain_state() -> dict | None:
         return None
 
 
+# Last-good team strength, persisted OUTSIDE the repo so it survives a fresh
+# Colab clone (which wipes ./data) — a transient odds/ClubElo outage then reuses
+# last week's ratings instead of collapsing to neutral.
+STRENGTH_STATE_PATH = os.path.expanduser("~/.fpl_strength.json")
+
+
+def save_strength_state(source: str, by_name: dict[str, float]) -> None:
+    try:
+        with open(STRENGTH_STATE_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"source": source,
+                       "saved": datetime.date.today().isoformat(),
+                       "strength": by_name}, fh)
+    except OSError:
+        pass
+
+
+def load_strength_state() -> dict | None:
+    try:
+        with open(STRENGTH_STATE_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 CLUBELO_URL = "https://api.clubelo.com"
 
 

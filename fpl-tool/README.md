@@ -65,12 +65,18 @@ What it does:
 2. **Opponent analysis** per team over the next `--horizon` gameweeks
    (default 5): each fixture is weighted by the *opponent's* strength — attack
    ease (weak opponent defences → more goals) and clean-sheet ease (weak
-   opponent attacks → more clean sheets) — plus FDR. **Nearer gameweeks weigh
-   more** (exponential decay), so a strong immediate run isn't diluted by soft
-   games four weeks out. Double gameweeks and blanks fall out naturally. The
-   team-strength prior is also **persisted outside the repo**, so a transient
-   betting-odds/ClubElo outage reuses the last good pull instead of collapsing
-   to neutral (important on Colab, where each run re-clones and wipes `./data`).
+   opponent attacks → more clean sheets). When FPL's team strengths are
+   unpublished (all 0, as deep pre-season or in a fresh dataset), the ease
+   **falls back to FDR** — the difficulty the FPL app shows, always present — so
+   fixtures keep driving the score/captaincy even with every external strength
+   feed down (they only ever refined a team's *own* attack multiplier). **Nearer
+   gameweeks weigh more** (exponential decay), so a strong immediate run isn't
+   diluted by soft games four weeks out. Double gameweeks and blanks fall out
+   naturally. The team-strength prior is also **persisted outside the repo**, so
+   a transient betting-odds/ClubElo outage reuses the last good pull instead of
+   collapsing to neutral (important on Colab, where each run re-clones and wipes
+   `./data`); the odds fetch retries transient 5xx and falls back to last
+   season's file if the current one has no matches yet.
 3. **Scores every player on expected FPL points**, not just price:
    - **Last season pooled with current** (via each player's `history_past`):
      pre-season the goals/assists/clean-sheet rates come from last season's real

@@ -355,12 +355,18 @@ def team_outlook(fixtures, teams, horizon):
             rec["gen"].append(fdr_multiplier(diff))
             rec["ev"].append(f["event"])
             rec["opp"].append(f"{opp.get('short_name', '?')} ({'H' if home else 'A'})")
+    # Fall back to FDR when FPL's team strengths are unpublished (kept in step
+    # with the module — see compute_team_outlook).
+    att_pub = avg_def > 0
+    cs_pub = avg_att > 0
     out = {}
     for tid, rec in acc.items():
         n = len(rec["fdr"])
+        att_eff = rec["att"] if att_pub else rec["gen"]
+        cs_eff = rec["cs"] if cs_pub else rec["gen"]
         out[tid] = {"n": n, "fdr": sum(rec["fdr"]) / n if n else None,
-                    "att": wmean(rec["att"], rec["ev"], 1.0),
-                    "cs": wmean(rec["cs"], rec["ev"], 1.0),
+                    "att": wmean(att_eff, rec["ev"], 1.0),
+                    "cs": wmean(cs_eff, rec["ev"], 1.0),
                     "gen": wmean(rec["gen"], rec["ev"], 1.0), "opp": rec["opp"]}
     return out, avg_def
 

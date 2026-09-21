@@ -257,6 +257,7 @@ class Player:
     next_opp: str = ""
     next_n: int = 0
     minutes_mult: float = 1.0   # availability/minutes-security factor (0..1)
+    week_points: float = 0.0    # full expected points for the upcoming GW alone
     is_pen_taker: bool = False
     is_setpiece: bool = False
     risky: bool = False
@@ -304,6 +305,7 @@ class TeamOutlook:
     next_n: int = 0
     next_attack_ease: float = 0.0
     next_cs_ease: float = 0.0
+    next_gen_ease: float = 0.0
     next_fdr: float | None = None
     next_opp: str = ""     # "MCI (A)" or "MCI (A), BOU (H)" in a double GW
 
@@ -350,15 +352,35 @@ def captain_score(p: "Player") -> float:
 
 
 def week_score(p: "Player") -> float:
-    """One-week expected points across attack + clean sheets, priced on the
-    *actual* upcoming fixture and tempered by availability. 0 on a blank; a
-    double GW counts twice. Used for weekly lineup calls (who to start), where
-    the 5-GW hold `score` is the wrong yardstick — and where an injured player
-    must never be recommended to start over a fit one."""
-    if not p.next_n:
-        return 0.0
-    return (p.attack_pts * p.next_attack_ease
-            + p.cs_pts * p.next_cs_ease) * p.minutes_mult
+    """Full expected points for the upcoming GW alone (attack + clean sheets +
+    baseline appearance/form), priced on the actual next fixture and tempered by
+    availability. 0 on a blank; a double GW counts twice. Used for weekly lineup
+    calls (who to start) — the 5-GW hold `score` is the wrong yardstick, and an
+    injured player must never be recommended to start over a fit one."""
+    return p.week_points
+
+
+# Real FPL formation bounds for a legal XI (1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD).
+# Wider than the Phase-1 optimizer's XI_BOUNDS, which deliberately bars 5 at the
+# back for a pre-season build; a manager's live XI can be any legal shape.
+FPL_XI_BOUNDS = {1: (1, 1), 2: (3, 5), 3: (2, 5), 4: (1, 3)}
+
+
+def best_xi(squad: list["Player"], key) -> list["Player"]:
+    """Best legal 11 from the 15 by `key`, under real FPL formation rules — so it
+    can recommend a formation change (e.g. dropping a defender to start a fit
+    forward), not just same-position swaps."""
+    prob = pulp.LpProblem("fpl_week_xi", pulp.LpMaximize)
+    start = {p.id: pulp.LpVariable(f"wx_{p.id}", cat="Binary") for p in squad}
+    by_id = {p.id: p for p in squad}
+    prob += pulp.lpSum(key(p) * start[p.id] for p in squad)
+    prob += pulp.lpSum(start.values()) == 11
+    for pos, (lo, hi) in FPL_XI_BOUNDS.items():
+        s = pulp.lpSum(start[p.id] for p in squad if p.position == pos)
+        prob += s >= lo
+        prob += s <= hi
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    return [by_id[pid] for pid, v in start.items() if v.value() and v.value() > 0.5]
 
 
 def _fdr_multiplier(difficulty: int) -> float:
@@ -450,6 +472,7 @@ def compute_team_outlook(fixtures: list[dict], teams: dict[int, dict],
             next_n=len(nx),
             next_attack_ease=sum(att_eff[i] for i in nx),
             next_cs_ease=sum(cs_eff[i] for i in nx),
+            next_gen_ease=sum(rec["gen"][i] for i in nx),
             next_fdr=(sum(rec["fdr"][i] for i in nx) / len(nx)) if nx else None,
             next_opp=", ".join(rec["opp"][i] for i in nx),
             avg_fdr=sum(rec["fdr"]) / n if n else None,      # plain mean (display)
@@ -649,6 +672,19 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
         if faded:
             score *= fade_strength
 
+        # Full expected points for the UPCOMING GW alone (one-week lineup calls):
+        # same components as per_game but priced on the actual next fixture, 0 on
+        # a blank, doubled on a double GW. Availability/backup-weighted like score.
+        week_points = 0.0
+        if ot and ot.next_n:
+            week_points = ((generic * ot.next_gen_ease
+                            + W_ATTACK * attack_pts * ot.next_attack_ease
+                            + W_CS * cs_pts * ot.next_cs_ease
+                            + saves_pts * ot.next_n)
+                           * minutes_mult * _nailed_factor(el, hist))
+            if faded:
+                week_points *= fade_strength
+
         selected_by = _to_float(el.get("selected_by_percent"))
         news = (el.get("news") or "").strip()
         if is_pen:
@@ -677,6 +713,7 @@ def build_players(bootstrap: dict, fixtures: list[dict], horizon: int,
             next_opp=(ot.next_opp if ot else ""),
             next_n=(ot.next_n if ot else 0),
             minutes_mult=minutes_mult,
+            week_points=week_points,
             chance=chance, status=el.get("status", "a"), news=news,
             selected_by=selected_by, is_pen_taker=is_pen, is_setpiece=is_sp,
             risky=risky, differential=selected_by < DIFF_OWNERSHIP,

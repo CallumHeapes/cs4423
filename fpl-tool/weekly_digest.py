@@ -178,14 +178,15 @@ def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
 
 
 def lineup_check(picks: dict, by_id: dict):
-    """Compare your set XI against your bench on projected score. FPL encodes
-    the XI as pick positions 1-11 and the bench as 12-15 (in autosub order).
-    Returns (swaps, bench_order):
-      - swaps: [(bench_player, starter_player, edge)] where a benched player
-        out-projects a *same-position* starter — always a formation-legal, free
-        swap you should make (biggest edge first);
-      - bench_order: the recommended outfield sub order (best-projected first)
-        when it differs from how the bench is currently ordered, else []."""
+    """Compare your set XI against the best *legal* XI from your 15 on this week's
+    expected points (opt.week_score). Formation-aware: a swap can change shape
+    (e.g. drop a defender to start a fit forward) as long as it stays a legal FPL
+    formation — 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD. Availability is priced in, so an
+    injured/benched player is never recommended to start. Returns
+    (swaps, bench_order, formation):
+      - swaps: [(bring_in, drop, edge)] pairs, biggest first;
+      - bench_order: recommended outfield sub order (best this week first), else [];
+      - formation: the resulting XI shape, e.g. "4-4-2"."""
     starters, bench = [], []
     for pk in picks.get("picks", []):
         p = by_id.get(pk["element"])
@@ -193,28 +194,36 @@ def lineup_check(picks: dict, by_id: dict):
             continue
         (starters if pk.get("position", 99) <= 11 else bench).append(
             (pk.get("position", 99), p))
-    # Rank on this week's expected points (actual fixture + availability), not the
-    # 5-GW hold value — starting is a one-week call, and an injured bench player
-    # must never be recommended over a fit starter (week_score prices both in).
-    swaps = []
-    for _, b in bench:
-        same = [s for _, s in starters if s.position == b.position]
-        if not same:
-            continue
-        weakest = min(same, key=opt.week_score)
-        edge = opt.week_score(b) - opt.week_score(weakest)
-        if edge >= LINEUP_MIN_EDGE:
-            swaps.append((b, weakest, edge))
-    swaps.sort(key=lambda t: -t[2])
-    # Outfield subs (GK excluded) should be strongest this week first for autosubs.
-    bench_out = [p for _, p in sorted(bench, key=lambda t: t[0]) if p.position != 1]
-    bench_sorted = sorted(bench_out, key=lambda p: -opt.week_score(p))
-    bench_order = bench_sorted if [p.id for p in bench_out] != \
-        [p.id for p in bench_sorted] else []
-    return swaps, bench_order
+    cur_xi = [p for _, p in starters]
+    squad = cur_xi + [p for _, p in bench]
+    if len(squad) < 11 or not cur_xi:
+        return [], [], ""
+
+    optimal = opt.best_xi(squad, opt.week_score)
+    cur_ids = {p.id for p in cur_xi}
+    opt_ids = {p.id for p in optimal}
+    bring_in = sorted((p for p in optimal if p.id not in cur_ids),
+                      key=lambda p: -opt.week_score(p))
+    drop = sorted((p for p in cur_xi if p.id not in opt_ids),
+                  key=lambda p: opt.week_score(p))
+    delta = (sum(opt.week_score(p) for p in bring_in)
+             - sum(opt.week_score(p) for p in drop))
+    swaps = [(bi, dr, opt.week_score(bi) - opt.week_score(dr))
+             for bi, dr in zip(bring_in, drop)] if delta >= LINEUP_MIN_EDGE else []
+
+    resulting_xi = optimal if swaps else cur_xi
+    formation = opt._formation(resulting_xi)
+    # Outfield sub order (best this week first) for the resulting bench.
+    xi_ids = {p.id for p in resulting_xi}
+    new_bench_out = sorted((p for p in squad if p.id not in xi_ids and p.position != 1),
+                           key=lambda p: -opt.week_score(p))
+    cur_bench_out = [p for _, p in sorted(bench, key=lambda t: t[0]) if p.position != 1]
+    bench_order = new_bench_out if (swaps or [p.id for p in cur_bench_out]
+                                    != [p.id for p in new_bench_out]) else []
+    return swaps, bench_order, formation
 
 
-def _render_lineup(swaps, bench_order) -> str:
+def _render_lineup(swaps, bench_order, formation="") -> str:
     out = ["## Starting XI check", ""]
     if not swaps and not bench_order:
         out.append("_Your XI already starts your best-projected eleven and your "
@@ -222,15 +231,17 @@ def _render_lineup(swaps, bench_order) -> str:
         out.append("")
         return "\n".join(out)
     if swaps:
-        out.append("_A player on your bench out-projects one you're starting. "
-                   "This is **free** — no transfer, no hit — so make the swap "
-                   "before the deadline:_")
+        note = f" (your XI becomes {formation})" if formation else ""
+        out.append("_A player on your bench out-projects one in your XI on this "
+                   "week's fixtures. These are **free** — no transfer, no hit — so "
+                   f"make the change before the deadline{note}:_")
         out.append("")
-        rows = ["| Start (from bench) | Over (in XI) | Pos | Δ score |",
-                "|--------------------|--------------|-----|---------|"]
-        for b, s, edge in swaps:
-            rows.append(f"| {b.name} ({b.team_short}) | {s.name} ({s.team_short}) "
-                        f"| {b.position_name} | +{edge:.1f} |")
+        rows = ["| Start (from bench) | Bench (from XI) | Δ this week |",
+                "|--------------------|-----------------|-------------|"]
+        for bi, dr, edge in swaps:
+            rows.append(f"| {bi.name} ({bi.team_short}, {bi.position_name}) | "
+                        f"{dr.name} ({dr.team_short}, {dr.position_name}) | "
+                        f"+{edge:.1f} |")
         out.append("\n".join(rows))
         out.append("")
     if bench_order:
@@ -475,8 +486,8 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
             "_No chips available._") + "\n"
 
     # Starting XI / bench-order check — free points you may be leaving benched.
-    swaps, bench_order = lineup_check(picks, by_id)
-    lineup_md = _render_lineup(swaps, bench_order)
+    swaps, bench_order, formation = lineup_check(picks, by_id)
+    lineup_md = _render_lineup(swaps, bench_order, formation)
 
     perf_md = performance_summary(history)
 

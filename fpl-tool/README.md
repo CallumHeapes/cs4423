@@ -148,12 +148,14 @@ bank, chips, and current captain, then produces one markdown digest:
 1. Fixture outlook over the next `--horizon` GWs for every club you own, plus a
    **team-strength line** naming which source loaded (betting odds → ClubElo →
    last-good cache → FPL/neutral) so you can see the prior the projections use.
-1b. **Starting XI check** — before any transfer talk, it compares your set XI to
-    your bench on **this week's** expected points (the actual fixture *and*
-    availability, not the 5-GW hold value), and flags any formation-legal,
-    same-position swap where a benched player beats a starter (a *free* change,
-    no hit), plus a best-first bench order. An injured/doubtful bench player is
-    never suggested to start over a fit one. Catches points left on the bench.
+1b. **Starting XI check** — before any transfer talk, it solves for the best
+    *legal* XI from your 15 on **this week's** expected points (the actual
+    fixture *and* availability, not the 5-GW hold value) and flags any change
+    worth making — including **formation changes** (e.g. drop a defender to start
+    a fit forward), not just same-position swaps, as long as the shape stays
+    legal (1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD). Shows the resulting formation, plus
+    a best-first bench order. An injured/doubtful bench player is never suggested
+    to start over a fit one. Catches points left on the bench.
 2. **Flags** each owned player for bad fixture runs, form dips, price-drop risk
    (heavy net transfers out), availability (injury/suspension/doubt), or
    **rotation risk** (fit but averaging low minutes — a sub or rotated after a

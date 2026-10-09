@@ -371,7 +371,7 @@ def best_xi(squad: list["Player"], key) -> list["Player"]:
     can recommend a formation change (e.g. dropping a defender to start a fit
     forward), not just same-position swaps."""
     prob = pulp.LpProblem("fpl_week_xi", pulp.LpMaximize)
-    start = {p.id: pulp.LpBinary(f"wx_{p.id}") for p in squad}
+    start = {p.id: pulp.LpVariable(f"wx_{p.id}", 0, 1, pulp.LpBinary) for p in squad}
     by_id = {p.id: p for p in squad}
     prob += pulp.lpSum(key(p) * start[p.id] for p in squad)
     prob += pulp.lpSum(start.values()) == 11
@@ -823,7 +823,7 @@ def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
             and not (fit_only and p.risky)]
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
-    pick = {p.id: pulp.LpBinary(f"pick_{p.id}") for p in pool}
+    pick = {p.id: pulp.LpVariable(f"pick_{p.id}", 0, 1, pulp.LpBinary) for p in pool}
     by_id = {p.id: p for p in pool}
 
     prob += pulp.lpSum(p.score * pick[p.id] for p in pool)
@@ -860,7 +860,7 @@ def optimize_squad(players: list[Player], *, budget: int, max_player_cost: int,
 def pick_starting_xi(squad: list[Player]) -> list[Player]:
     """Best legal 11 from the 15 (1 GK, 3-4 DEF, 3-5 MID, 2-3 FWD)."""
     prob = pulp.LpProblem("fpl_xi", pulp.LpMaximize)
-    start = {p.id: pulp.LpBinary(f"start_{p.id}") for p in squad}
+    start = {p.id: pulp.LpVariable(f"start_{p.id}", 0, 1, pulp.LpBinary) for p in squad}
     by_id = {p.id: p for p in squad}
 
     prob += pulp.lpSum(p.score * start[p.id] for p in squad)

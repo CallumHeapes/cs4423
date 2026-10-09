@@ -367,20 +367,43 @@ FPL_XI_BOUNDS = {1: (1, 1), 2: (3, 5), 3: (2, 5), 4: (1, 3)}
 
 
 def best_xi(squad: list["Player"], key) -> list["Player"]:
-    """Best legal 11 from the 15 by `key`, under real FPL formation rules — so it
-    can recommend a formation change (e.g. dropping a defender to start a fit
-    forward), not just same-position swaps."""
-    prob = pulp.LpProblem("fpl_week_xi", pulp.LpMaximize)
-    start = {p.id: pulp.LpVariable(f"wx_{p.id}", 0, 1, pulp.LpBinary) for p in squad}
-    by_id = {p.id: p for p in squad}
-    prob += pulp.lpSum(key(p) * start[p.id] for p in squad)
-    prob += pulp.lpSum(start.values()) == 11
-    for pos, (lo, hi) in FPL_XI_BOUNDS.items():
-        s = pulp.lpSum(start[p.id] for p in squad if p.position == pos)
-        prob += s >= lo
-        prob += s <= hi
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    return [by_id[pid] for pid, v in start.items() if v.value() and v.value() > 0.5]
+    """Best legal 11 from the 15 by `key`, under real FPL formation rules.
+
+    Greedy algorithm: rank by score, pick the top 11 that fit formation bounds
+    (1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD). Not perfectly optimal like an ILP solver,
+    but fast and works without PuLP."""
+    by_pos = {pos: sorted((p for p in squad if p.position == pos),
+                          key=key, reverse=True)
+              for pos in (1, 2, 3, 4)}
+    lo, hi = FPL_XI_BOUNDS
+
+    # Greedily fill each position from top-scoring players.
+    xi = []
+    used = set()
+    for pos in (1, 2, 3, 4):
+        lo_pos, hi_pos = lo[pos], hi[pos]
+        for p in by_pos[pos]:
+            if p.id in used:
+                continue
+            if len(xi) < 11 and len([x for x in xi if x.position == pos]) < hi_pos:
+                xi.append(p)
+                used.add(p.id)
+            if len([x for x in xi if x.position == pos]) >= lo_pos:
+                break
+
+    # If still under 11, fill remaining slots from highest-scoring available.
+    if len(xi) < 11:
+        remaining = sorted((p for p in squad if p.id not in used),
+                          key=key, reverse=True)
+        for p in remaining:
+            if len(xi) >= 11:
+                break
+            pos_count = len([x for x in xi if x.position == p.position])
+            if pos_count < hi[p.position]:
+                xi.append(p)
+                used.add(p.id)
+
+    return xi
 
 
 def _fdr_multiplier(difficulty: int) -> float:

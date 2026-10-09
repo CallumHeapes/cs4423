@@ -75,13 +75,15 @@ def flag_reasons(p: opt.Player, el: dict, horizon: int,
     reasons: list[str] = []
     status = el.get("status", "a")
     chance = el.get("chance_of_playing_next_round")
+    news = (el.get("news") or "").strip()
     if status in ("i", "s", "u", "n"):
         label = {"i": "injured", "s": "suspended", "u": "unavailable",
                  "n": "not in squad"}[status]
-        news = (el.get("news") or "").strip()
         reasons.append(f"availability: {news or label}")
     elif chance is not None and chance < 75:
         reasons.append(f"availability: {chance}% to play")
+    elif chance == 75 and news:
+        reasons.append(f"availability: 🟡 yellow flag — 75% to play ({news})")
 
     # Rotation risk: fit and featuring, but averaging low minutes (a sub / rotated,
     # e.g. after a move). Distinct from an injury flag; needs a few GWs of sample.
@@ -461,8 +463,11 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
     for p in my_players:
         reasons = flag_reasons(p, el_by_id.get(p.id, {}), horizon, current_gw)
         if reasons:
-            flagged.append((p, reasons, suggest_replacements(
-                p, players, my_ids, bank, club_counts)))
+            # Don't suggest replacements for availability-flagged players.
+            has_availability_flag = any("availability:" in r for r in reasons)
+            suggestions = [] if has_availability_flag else suggest_replacements(
+                p, players, my_ids, bank, club_counts)
+            flagged.append((p, reasons, suggestions))
         if price_drop_risk(el_by_id.get(p.id, {})):
             price_watch.append(p)
 

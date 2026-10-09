@@ -201,7 +201,11 @@ def lineup_check(picks: dict, by_id: dict):
     if len(squad) < 11 or not cur_xi:
         return [], [], ""
 
-    optimal = opt.best_xi(squad, opt.week_score)
+    try:
+        optimal = opt.best_xi(squad, opt.week_score)
+    except (TypeError, AttributeError):
+        # PuLP compatibility issue (old Colab version); skip XI check.
+        return [], [], ""
     cur_ids = {p.id for p in cur_xi}
     opt_ids = {p.id for p in optimal}
     bring_in = sorted((p for p in optimal if p.id not in cur_ids),

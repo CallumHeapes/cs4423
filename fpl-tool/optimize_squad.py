@@ -375,13 +375,12 @@ def best_xi(squad: list["Player"], key) -> list["Player"]:
     by_pos = {pos: sorted((p for p in squad if p.position == pos),
                           key=key, reverse=True)
               for pos in (1, 2, 3, 4)}
-    lo, hi = FPL_XI_BOUNDS
 
     # Greedily fill each position from top-scoring players.
     xi = []
     used = set()
     for pos in (1, 2, 3, 4):
-        lo_pos, hi_pos = lo[pos], hi[pos]
+        lo_pos, hi_pos = FPL_XI_BOUNDS[pos]
         for p in by_pos[pos]:
             if p.id in used:
                 continue
@@ -398,8 +397,9 @@ def best_xi(squad: list["Player"], key) -> list["Player"]:
         for p in remaining:
             if len(xi) >= 11:
                 break
+            lo_pos, hi_pos = FPL_XI_BOUNDS[p.position]
             pos_count = len([x for x in xi if x.position == p.position])
-            if pos_count < hi[p.position]:
+            if pos_count < hi_pos:
                 xi.append(p)
                 used.add(p.id)
 

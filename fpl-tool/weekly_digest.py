@@ -17,8 +17,11 @@ weight_for_gw), so last year's data phases out automatically as the season runs.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from collections import Counter
+from datetime import datetime, timezone
 
 import fetch_data
 import optimize_squad as opt
@@ -415,9 +418,28 @@ def _render_radar(radar, current_gw):
     return "\n".join(out)
 
 
+def log_run(path: str, next_gw: int, my_players, captain) -> None:
+    """Record this run's projections and captain pick, keyed by gameweek, so
+    review_history.py can later compare them with what actually happened."""
+    try:
+        with open(path) as f:
+            log = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        log = {"runs": {}}
+    log["runs"][str(next_gw)] = {
+        "saved_at": datetime.now(timezone.utc).isoformat(timespec="minutes"),
+        "captain": {"id": captain.id, "name": captain.name},
+        "projections": {str(p.id): round(opt.week_score(p), 2) for p in my_players},
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(log, f, indent=1)
+
+
 def build_digest(*, team_id: int, horizon: int, free_transfers: int,
                  offline: bool, use_template: bool = True,
-                 template_top_n: int = TEMPLATE_TOP_N) -> str:
+                 template_top_n: int = TEMPLATE_TOP_N,
+                 log_path: str | None = None) -> str:
     bootstrap = fetch_data.get_bootstrap(refresh=not offline, offline=offline)
     fixtures = fetch_data.get_fixtures(refresh=not offline, offline=offline)
     current_gw, next_gw = fetch_data.current_and_next_gw(bootstrap)
@@ -479,6 +501,8 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
     vice_pool = [p for p in cap_pool if p.team_id != captain.team_id] or \
                 [p for p in cap_pool if p.id != captain.id]
     vice = max(vice_pool, key=_cap_key)
+    if log_path and next_gw:
+        log_run(log_path, next_gw, my_players, captain)
 
     # Blank/double radar + chip predictor.
     radar = fixture_radar(fixtures, my_players, current_gw)
@@ -707,12 +731,16 @@ def _main(argv: list[str] | None = None) -> int:
                              f"(default {TEMPLATE_TOP_N})")
     parser.add_argument("--offline", action="store_true",
                         help="use the cached ./data snapshot instead of fetching live")
+    parser.add_argument("--log", default=os.path.expanduser("~/.fpl_digest_log.json"),
+                        help="where to log each run's projections for review_history.py "
+                             "(on Colab, use a Drive path so it survives restarts)")
     args = parser.parse_args(argv)
 
     try:
         digest = build_digest(team_id=args.team_id, horizon=args.horizon,
                               free_transfers=args.free_transfers, offline=args.offline,
-                              use_template=not args.no_template, template_top_n=args.top)
+                              use_template=not args.no_template, template_top_n=args.top,
+                              log_path=args.log)
     except (RuntimeError, opt.OptimizationError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

@@ -197,6 +197,25 @@ manual switchover.
 > The public API can't reliably report your free-transfer count, so pass
 > `--free-transfers N` (default 1).
 
+## Season review — how the model is doing
+
+```bash
+python review_history.py                                  # actual results per finished GW
+python review_history.py --log ~/.fpl_digest_log.json     # plus projected vs actual
+```
+
+Works from the FPL API, so it covers every finished gameweek: your points, bench
+points, hits and rank; how often your captain was your best starter and how many
+points that cost; points the starting XI left on the table against the best legal
+XI from your squad; and each gameweek's transfers.
+
+Each `weekly_digest.py` run also appends its projections and captain pick to the
+`--log` file (default `~/.fpl_digest_log.json`). The projected-vs-actual section
+compares those projections with the points players actually scored, using only
+players you owned that week. It starts from the first logged run. On Colab, pass a
+Drive path (for example `--log /content/drive/MyDrive/fpl_digest_log.json`) so the
+log survives restarts.
+
 ## Benchmark — vs the field & elite managers
 
 ```bash

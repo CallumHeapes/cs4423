@@ -169,6 +169,11 @@ def get_entry_history(team_id: int | None = None) -> dict:
     return _get_json(f"entry/{team_id}/history")
 
 
+def get_event_live(gw: int) -> dict:
+    """Every player's points for a gameweek (finished or in progress)."""
+    return _get_json(f"event/{gw}/live")
+
+
 OVERALL_LEAGUE_ID = 314  # the classic league every FPL manager is in
 
 

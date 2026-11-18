@@ -65,9 +65,25 @@ def _f(v, default: float = 0.0) -> float:
         return default
 
 
-def _cap_key(p: opt.Player) -> float:
-    # This week's captaincy value — the actual next opponent, not a 5-GW average.
-    return opt.captain_score(p)
+CAPTAIN_FORM_FLOOR = 0.5  # a cold streak can halve a captain's value, not zero it
+
+
+def _cap_key(p: opt.Player, el: dict) -> float:
+    """This week's captaincy value: the actual next opponent (not a 5-GW average),
+    discounted by recent form against season average."""
+    base = opt.captain_score(p)
+    ppg = _f(el.get("points_per_game"))
+    if ppg <= 0:
+        return base
+    ratio = min(max(_f(el.get("form")) / ppg, 0.0), 1.0)
+    return base * (CAPTAIN_FORM_FLOOR + (1 - CAPTAIN_FORM_FLOOR) * ratio)
+
+
+def captain_eligible(p: opt.Player, el: dict, horizon: int,
+                     current_gw: int | None) -> bool:
+    """Never captain a doubtful/injured player or one in a form dip."""
+    return not any(r.startswith(("availability", "form dip"))
+                   for r in flag_reasons(p, el, horizon, current_gw))
 
 
 def flag_reasons(p: opt.Player, el: dict, horizon: int,
@@ -495,12 +511,18 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
 
     # Captain: best attacking threat among my mids/forwards.
     # Captain on this week's fixture; never a player who blanks the upcoming GW.
-    cap_pool = [p for p in my_players if p.position in (3, 4) and p.next_n] or \
+    def cap_value(p):
+        return _cap_key(p, el_by_id.get(p.id, {}))
+
+    attackers = [p for p in my_players if p.position in (3, 4) and p.next_n]
+    eligible = [p for p in attackers
+                if captain_eligible(p, el_by_id.get(p.id, {}), horizon, current_gw)]
+    cap_pool = eligible or attackers or \
                [p for p in my_players if p.position in (3, 4)] or my_players
-    captain = max(cap_pool, key=_cap_key)
+    captain = max(cap_pool, key=cap_value)
     vice_pool = [p for p in cap_pool if p.team_id != captain.team_id] or \
                 [p for p in cap_pool if p.id != captain.id]
-    vice = max(vice_pool, key=_cap_key)
+    vice = max(vice_pool, key=cap_value)
     if log_path and next_gw:
         log_run(log_path, next_gw, my_players, captain)
 
@@ -689,20 +711,25 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
                "threat from a different club.")
     # Ranked shortlist so a big-name pick with a hard fixture is visibly demoted.
     ranked = sorted([p for p in my_players if p.position in (3, 4)],
-                    key=_cap_key, reverse=True)[:4]
+                    key=lambda p: _cap_key(p, el_by_id.get(p.id, {})),
+                    reverse=True)[:4]
     if len(ranked) > 1:
         out.append("")
         out.append("_This week's armband options (attacking threat × the actual "
-                   "fixture — higher ease = softer opponent, lower FDR = easier):_")
+                   "fixture, discounted for a cold streak — higher ease = softer "
+                   "opponent, lower FDR = easier):_")
         out.append("")
-        out.append("| Player | Fixture | FDR | xGI/90 | Fixture ease |")
-        out.append("|--------|---------|-----|--------|--------------|")
+        out.append("| Player | Fixture | FDR | xGI/90 | Fixture ease | Form | Captain? |")
+        out.append("|--------|---------|-----|--------|--------------|------|----------|")
         for p in ranked:
+            el = el_by_id.get(p.id, {})
             fx = p.next_opp or "blank"
             fdr = f"{p.next_fdr:.0f}" if (p.next_n and p.next_fdr) else "—"
             ease = f"{p.next_attack_ease:.2f}×" if p.next_n else "— (blank)"
+            ok = ("yes" if captain_eligible(p, el, horizon, None)
+                  else "no (doubt / form dip)")
             out.append(f"| {p.name} ({p.team_short}) | {fx} | {fdr} | "
-                       f"{p.xgi90:.2f} | {ease} |")
+                       f"{p.xgi90:.2f} | {ease} | {_f(el.get('form')):.1f} | {ok} |")
     out.append("")
 
     if extra.strip():

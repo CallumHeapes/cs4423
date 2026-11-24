@@ -17,6 +17,7 @@ import statistics
 import sys
 from collections import Counter
 
+import captain_tests
 import fetch_data
 import optimize_squad as opt
 
@@ -106,82 +107,6 @@ def review_results(team_id: int, bootstrap: dict, finished: list[int]) -> str:
             out.append(f"- **GW{gw}:** in {', '.join(tin) or '—'} · "
                        f"out {', '.join(tout) or '—'}")
         out.append("")
-    return "\n".join(out)
-
-
-def _f(value) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def captain_backtest(team_id: int, bootstrap: dict, finished: list[int],
-                     log_path: str | None = None) -> str:
-    """Score simple captain rules on past gameweeks. Each rule uses only data from
-    before the gameweek it picks for, so the comparison is fair."""
-    pos_of = {el["id"]: el["element_type"] for el in bootstrap["elements"]}
-    live = {gw: {e["id"]: e["stats"] for e in fetch_data.get_event_live(gw)["elements"]}
-            for gw in finished}
-    logged: dict[int, int] = {}
-    if log_path and os.path.exists(log_path):
-        with open(log_path) as f:
-            logged = {int(k): v["captain"]["id"] for k, v in json.load(f)["runs"].items()}
-
-    def pts(gw: int, i: int) -> int:
-        return live[gw].get(i, {}).get("total_points", 0)
-
-    def xgi(gw: int, i: int) -> float:
-        return _f(live[gw].get(i, {}).get("expected_goal_involvements"))
-
-    rules = {
-        "Recent points (last 3 GWs)":
-            lambda i, prior: statistics.mean(pts(g, i) for g in prior[-3:]),
-        "Recent xGI (last 3 GWs)":
-            lambda i, prior: statistics.mean(xgi(g, i) for g in prior[-3:]),
-        "Season points per GW":
-            lambda i, prior: statistics.mean(pts(g, i) for g in prior),
-    }
-
-    results: dict[str, list[int]] = {name: [] for name in rules}
-    for name in ("Your actual captain", "Average attacker in XI",
-                 "Best attacker in XI (hindsight)", "Model captain (logged)"):
-        results[name] = []
-
-    for gw in finished:
-        prior = [g for g in finished if g < gw]
-        if not prior:
-            continue
-        picks = fetch_data.get_entry_picks(gw, team_id)["picks"]
-        cands = [pk["element"] for pk in picks
-                 if pk["position"] <= 11 and pos_of[pk["element"]] in (3, 4)]
-        if not cands:
-            continue
-        actual = next(pk["element"] for pk in picks if pk.get("is_captain"))
-        for name, score in rules.items():
-            choice = max(cands, key=lambda i: score(i, prior))
-            results[name].append(pts(gw, choice))
-        results["Your actual captain"].append(pts(gw, actual))
-        results["Average attacker in XI"].append(
-            statistics.mean(pts(gw, i) for i in cands))
-        results["Best attacker in XI (hindsight)"].append(
-            max(pts(gw, i) for i in cands))
-        if logged.get(gw) in cands:
-            results["Model captain (logged)"].append(pts(gw, logged[gw]))
-
-    scored = [(name, vals) for name, vals in results.items() if vals]
-    if not scored:
-        return ""
-    n = len(results["Your actual captain"])
-    out = ["## Captain rules, backtested", "",
-           f"Average captain points over {n} gameweeks (base points, before the "
-           "doubling). Each rule only uses information from before that gameweek.", "",
-           "| Rule | Avg pts | GWs |", "|------|---------|-----|"]
-    for name, vals in sorted(scored, key=lambda kv: statistics.mean(kv[1]), reverse=True):
-        out.append(f"| {name} | {statistics.mean(vals):.1f} | {len(vals)} |")
-    out += ["", "_Average attacker in XI is what a random pick would earn. Best "
-            "attacker (hindsight) is the ceiling no rule can reach. The model captain "
-            "only has logged gameweeks, so its average covers fewer weeks._", ""]
     return "\n".join(out)
 
 
@@ -305,7 +230,7 @@ def _main(argv: list[str] | None = None) -> int:
     finished = [e["id"] for e in bootstrap["events"] if e.get("finished")]
     print(f"# Corrib Athletic — season review ({len(finished)} finished GWs)\n")
     print(review_results(args.team_id, bootstrap, finished))
-    print(captain_backtest(args.team_id, bootstrap, finished, args.log))
+    print(captain_tests.report(args.team_id, bootstrap, finished, args.log))
     print(transfer_backtest(args.team_id, bootstrap, finished))
     if os.path.exists(args.log):
         print(review_projections(args.log, args.team_id, bootstrap, finished))

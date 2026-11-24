@@ -185,6 +185,69 @@ def captain_backtest(team_id: int, bootstrap: dict, finished: list[int],
     return "\n".join(out)
 
 
+def transfer_backtest(team_id: int, bootstrap: dict, finished: list[int]) -> str:
+    """Two transfer checks, using only points. Prices are today's (the API keeps no
+    price history), and bank and hit costs are ignored.
+
+    1. Your actual transfers: did the player you bought outscore the one you sold
+       over the next three gameweeks?
+    2. A simple rule: each week, sell your weakest recent scorer and buy the best
+       recent scorer in the same position, within £1.0m of the sale price."""
+    pos_of = {el["id"]: el["element_type"] for el in bootstrap["elements"]}
+    cost_of = {el["id"]: el["now_cost"] for el in bootstrap["elements"]}
+    live = {gw: {e["id"]: e["stats"]["total_points"]
+                 for e in fetch_data.get_event_live(gw)["elements"]} for gw in finished}
+    picks = {gw: {pk["element"] for pk in fetch_data.get_entry_picks(gw, team_id)["picks"]}
+             for gw in finished}
+
+    def pts(gw: int, i: int) -> int:
+        return live[gw].get(i, 0)
+
+    def recent(idx: int, i: int) -> float:
+        window = finished[max(0, idx - 3):idx]
+        return statistics.mean(pts(g, i) for g in window) if window else 0.0
+
+    actual: list[float] = []
+    for idx in range(1, len(finished)):
+        gw, prev = finished[idx], finished[idx - 1]
+        future = finished[idx:idx + 3]
+        for pos in (1, 2, 3, 4):
+            bought = sorted(i for i in picks[gw] - picks[prev] if pos_of[i] == pos)
+            sold = sorted(i for i in picks[prev] - picks[gw] if pos_of[i] == pos)
+            for b, s in zip(bought, sold):
+                gain = sum(pts(g, b) - pts(g, s) for g in future)
+                actual.append(gain / len(future))
+
+    rule: list[float] = []
+    for idx in range(3, len(finished)):
+        gw = finished[idx]
+        squad = picks[gw]
+        sell = min(squad, key=lambda i: recent(idx, i))
+        pool = [i for i in pos_of if pos_of[i] == pos_of[sell] and i not in squad
+                and cost_of[i] <= cost_of[sell] + 10]
+        if not pool:
+            continue
+        buy = max(pool, key=lambda i: recent(idx, i))
+        rule.append(pts(gw, buy) - pts(gw, sell))
+
+    def row(name: str, gains: list[float]) -> str:
+        if not gains:
+            return f"| {name} | 0 | — | — |"
+        positive = sum(g > 0 for g in gains) / len(gains) * 100
+        return (f"| {name} | {len(gains)} | {statistics.mean(gains):+.1f} | "
+                f"{positive:.0f}% |")
+
+    out = ["## Transfer backtest", "",
+           "Average points per week the incoming player gained over the outgoing "
+           "player. Prices are today's and bank and hit costs are ignored.", "",
+           "| Test | Moves | Avg gain / week | Positive |",
+           "|------|-------|-----------------|----------|",
+           row("Your actual transfers (next 3 GWs)", actual),
+           row("Rule: sell weakest, buy best same-position form", rule),
+           ""]
+    return "\n".join(out)
+
+
 def review_projections(log_path: str, team_id: int, bootstrap: dict,
                        finished: list[int]) -> str:
     names = {el["id"]: el["web_name"] for el in bootstrap["elements"]}
@@ -243,6 +306,7 @@ def _main(argv: list[str] | None = None) -> int:
     print(f"# Corrib Athletic — season review ({len(finished)} finished GWs)\n")
     print(review_results(args.team_id, bootstrap, finished))
     print(captain_backtest(args.team_id, bootstrap, finished, args.log))
+    print(transfer_backtest(args.team_id, bootstrap, finished))
     if os.path.exists(args.log):
         print(review_projections(args.log, args.team_id, bootstrap, finished))
     else:

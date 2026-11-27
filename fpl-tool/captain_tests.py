@@ -5,8 +5,10 @@ form, fixtures, results and top managers' captain choices, which are made before
 the deadline. Used by review_history.py.
 
 Caveats: the top-manager list is today's (past standings can't be fetched), and
-penalty duty and the top-manager list are current, not historical. The weighted
-search is tuned on the first half of the season and checked on the second half.
+penalty duty is current, not historical. Top managers' captains are taken from the
+previous gameweek, since that's the only captain information visible before your
+own deadline. The weighted search is tuned on the first half of the season and
+checked on the second half.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ RULES = {
     "Recent points (last 3 GWs)": ("recent_pts",),
     "Recent xGI (last 3 GWs)": ("recent_xgi",),
     "Season xG per 90": ("season_xg90",),
-    "Top managers' captain, then recent points": ("top_share", "recent_pts"),
+    "Top managers' last-GW captain, then recent points": ("top_share", "recent_pts"),
     "Penalty taker, then recent points": ("penalty", "recent_pts"),
     "Weakest opponent, then recent points": ("opp_conceded", "recent_pts"),
     "Home, then recent points": ("home", "recent_pts"),
@@ -69,6 +71,13 @@ def build_cases(team_id: int, bootstrap: dict, finished: list[int],
             conceded[(ev, f["team_a"])] = f["team_h_score"]
 
     top_ids = fetch_data.get_top_manager_ids(TOP_MANAGERS)
+    top_share_by_gw: dict[int, dict[int, float]] = {}
+    for gw in finished:
+        top = fetch_data.get_manager_picks_bulk(top_ids, gw)
+        counts = Counter(pk["element"] for p in top.values()
+                         for pk in p["picks"] if pk.get("is_captain"))
+        n_top = max(len(top), 1)
+        top_share_by_gw[gw] = {i: c / n_top for i, c in counts.items()}
     logged: dict[int, int] = {}
     if log_path and os.path.exists(log_path):
         with open(log_path) as f:
@@ -87,10 +96,7 @@ def build_cases(team_id: int, bootstrap: dict, finished: list[int],
             continue
         actual = next(pk["element"] for pk in picks if pk.get("is_captain"))
 
-        top = fetch_data.get_manager_picks_bulk(top_ids, gw)
-        cap_counts = Counter(pk["element"] for p in top.values()
-                             for pk in p["picks"] if pk.get("is_captain"))
-        n_top = max(len(top), 1)
+        last_top = top_share_by_gw[prior[-1]]
 
         feats: dict[int, dict[str, float]] = {}
         for i in cands:
@@ -104,7 +110,7 @@ def build_cases(team_id: int, bootstrap: dict, finished: list[int],
                                 / max(sum(stat(g, i, "minutes") for g in prior), 1) * 90),
                 "home": 1.0 if home else 0.0,
                 "opp_conceded": statistics.mean(conc) if conc else 1.0,
-                "top_share": cap_counts.get(i, 0) / n_top,
+                "top_share": last_top.get(i, 0.0),
                 "penalty": 1.0 if pen_of.get(i) == 1 else 0.0,
                 "starter": 1.0 if all(stat(g, i, "minutes") >= STARTER_MINUTES
                                       for g in recent) else 0.0,

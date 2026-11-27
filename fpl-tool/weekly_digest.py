@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -66,6 +67,8 @@ def _f(v, default: float = 0.0) -> float:
 
 
 CAPTAIN_FORM_FLOOR = 0.5  # a cold streak can halve a captain's value, not zero it
+CAPTAIN_OPP_WEIGHT = 0.5   # weight on the opponent's recent goals conceded
+CAPTAIN_TOP_WEIGHT = 0.5   # weight on top managers' captain share last gameweek
 
 
 def _cap_key(p: opt.Player, el: dict) -> float:
@@ -155,19 +158,56 @@ def suggest_replacements(p: opt.Player, players: list[opt.Player], my_ids: set[i
     return out[:n]
 
 
-def elite_ownership(top_n: int, gw: int) -> tuple[dict[int, float], int]:
-    """{player_id: share of the top `top_n` managers who own them}, plus the
-    number of managers actually read. Same signal benchmark.py uses."""
+def elite_ownership(top_n: int, gw: int
+                    ) -> tuple[dict[int, float], dict[int, float], int]:
+    """({player_id: share of the top `top_n` managers who own them},
+    {player_id: share who captained them}, managers actually read). Same signal
+    benchmark.py uses; the captain shares feed the captaincy score."""
     mgr_ids = fetch_data.get_top_manager_ids(top_n)
     picks_by = fetch_data.get_manager_picks_bulk(mgr_ids, gw)
     n = len(picks_by)
     if not n:
-        return {}, 0
+        return {}, {}, 0
     own: Counter = Counter()
+    captains: Counter = Counter()
     for p in picks_by.values():
         for pk in p["picks"]:
             own[pk["element"]] += 1
-    return {pid: c / n for pid, c in own.items()}, n
+            if pk.get("is_captain"):
+                captains[pk["element"]] += 1
+    return ({pid: c / n for pid, c in own.items()},
+            {pid: c / n for pid, c in captains.items()}, n)
+
+
+def recent_goals_conceded(fixtures: list[dict], current_gw: int | None,
+                          window: int = 3) -> dict[int, float]:
+    """{team_id: average goals conceded over its last `window` finished gameweeks}."""
+    done = sorted({f["event"] for f in fixtures if f.get("finished") and f["event"]
+                   and (current_gw is None or f["event"] <= current_gw)})[-window:]
+    conceded: dict[int, list[int]] = {}
+    for f in fixtures:
+        if f["event"] in done and f.get("finished") and f.get("team_h_score") is not None:
+            conceded.setdefault(f["team_h"], []).append(f["team_a_score"])
+            conceded.setdefault(f["team_a"], []).append(f["team_h_score"])
+    return {team: statistics.mean(goals) for team, goals in conceded.items()}
+
+
+def next_opponents(fixtures: list[dict], next_gw: int | None) -> dict[int, int]:
+    """{team_id: opponent team_id} for the upcoming gameweek."""
+    opp: dict[int, int] = {}
+    for f in fixtures:
+        if next_gw and f["event"] == next_gw:
+            opp[f["team_h"]] = f["team_a"]
+            opp[f["team_a"]] = f["team_h"]
+    return opp
+
+
+def _z(values: dict[int, float]) -> dict[int, float]:
+    xs = list(values.values())
+    if len(xs) < 2:
+        return {k: 0.0 for k in values}
+    mean, sd = statistics.mean(xs), statistics.pstdev(xs)
+    return {k: ((v - mean) / sd if sd else 0.0) for k, v in values.items()}
 
 
 def template_holes(elite: dict[int, float], my_players, by_id, bank: int):
@@ -509,16 +549,37 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
         if price_drop_risk(el_by_id.get(p.id, {})):
             price_watch.append(p)
 
-    # Captain: best attacking threat among my mids/forwards.
-    # Captain on this week's fixture; never a player who blanks the upcoming GW.
-    def cap_value(p):
-        return _cap_key(p, el_by_id.get(p.id, {}))
+    # Captaincy: this week's fixture value, plus the upcoming opponent's recent goals
+    # conceded and how many top managers captained each player last gameweek (both
+    # known before the deadline). Captains must be attackers with a fixture and
+    # no doubt or form dip; the weights are untested, so they stay modest.
+    print(f"Reading top managers' captains from the top {template_top_n} managers...",
+          file=sys.stderr)
+    elite, cap_share, n_elite = elite_ownership(template_top_n, current_gw)
+    conceded = recent_goals_conceded(fixtures, current_gw)
+    opp_of = next_opponents(fixtures, next_gw)
 
-    attackers = [p for p in my_players if p.position in (3, 4) and p.next_n]
-    eligible = [p for p in attackers
+    attackers = [p for p in my_players if p.position in (3, 4)]
+    opp_conc = {}
+    for p in attackers:
+        opp = opp_of.get(p.team_id)
+        opp_conc[p.id] = conceded.get(opp, 1.0) if opp else 1.0
+    fixture_val = {p.id: _cap_key(p, el_by_id.get(p.id, {})) for p in attackers}
+    top_share = {p.id: cap_share.get(p.id, 0.0) for p in attackers}
+    z_fix, z_opp, z_top = _z(fixture_val), _z(opp_conc), _z(top_share)
+    cap_score = {p.id: z_fix[p.id] + CAPTAIN_OPP_WEIGHT * z_opp[p.id]
+                 + CAPTAIN_TOP_WEIGHT * z_top[p.id] for p in attackers}
+    cap_detail = {p.id: {"score": cap_score[p.id], "opp": opp_conc[p.id],
+                         "top": top_share[p.id]} for p in attackers}
+
+    with_fixture = [p for p in attackers if p.next_n]
+    eligible = [p for p in with_fixture
                 if captain_eligible(p, el_by_id.get(p.id, {}), horizon, current_gw)]
-    cap_pool = eligible or attackers or \
-               [p for p in my_players if p.position in (3, 4)] or my_players
+    cap_pool = eligible or with_fixture or attackers or my_players
+
+    def cap_value(p):
+        return cap_score.get(p.id, float("-inf"))
+
     captain = max(cap_pool, key=cap_value)
     vice_pool = [p for p in cap_pool if p.team_id != captain.team_id] or \
                 [p for p in cap_pool if p.id != captain.id]
@@ -552,9 +613,6 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
     # Template holes — elite picks you're missing that you could afford.
     template_md = ""
     if use_template:
-        print(f"Reading elite ownership from the top {template_top_n} managers...",
-              file=sys.stderr)
-        elite, n_elite = elite_ownership(template_top_n, current_gw)
         holes = template_holes(elite, my_players, by_id, bank) if elite else []
         template_md = _render_template(holes, n_elite)
 
@@ -563,7 +621,8 @@ def build_digest(*, team_id: int, horizon: int, free_transfers: int,
                    current_cap, weight, horizon, el_by_id,
                    extra=template_md + "\n" + price_md + "\n" + radar_md + "\n" + chip_md,
                    perf_md=perf_md, lineup_md=lineup_md,
-                   strength_source=strength_source, n_strength=len(elo_by_team))
+                   strength_source=strength_source, n_strength=len(elo_by_team),
+                   cap_detail=cap_detail)
 
 
 def _render_template(holes, n_elite) -> str:
@@ -603,7 +662,8 @@ def _render_template(holes, n_elite) -> str:
 def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
             my_players, flagged, captain, vice, current_cap, weight, horizon,
             el_by_id, extra="", perf_md="", lineup_md="",
-            strength_source="FPL/neutral", n_strength=0) -> str:
+            strength_source="FPL/neutral", n_strength=0, cap_detail=None) -> str:
+    cap_detail = cap_detail or {}
     # Defensive: never let a non-string section crash the whole digest.
     extra = extra if isinstance(extra, str) else ("" if extra is None else str(extra))
     perf_md = perf_md if isinstance(perf_md, str) else ("" if perf_md is None else str(perf_md))
@@ -711,25 +771,32 @@ def _render(entry, next_gw, bank, squad_value, free_transfers, available_chips,
                "threat from a different club.")
     # Ranked shortlist so a big-name pick with a hard fixture is visibly demoted.
     ranked = sorted([p for p in my_players if p.position in (3, 4)],
-                    key=lambda p: _cap_key(p, el_by_id.get(p.id, {})),
+                    key=lambda p: cap_detail.get(p.id, {}).get("score", float("-inf")),
                     reverse=True)[:4]
     if len(ranked) > 1:
         out.append("")
-        out.append("_This week's armband options (attacking threat × the actual "
-                   "fixture, discounted for a cold streak — higher ease = softer "
-                   "opponent, lower FDR = easier):_")
+        out.append("_This week's armband options. Score = fixture value (attacking "
+                   "threat × ease, discounted for form) + opponent goals conceded "
+                   f"over their last three matches (weight {CAPTAIN_OPP_WEIGHT}) + "
+                   "share of top managers who captained the player last gameweek "
+                   f"(weight {CAPTAIN_TOP_WEIGHT}). Untested weights._")
         out.append("")
-        out.append("| Player | Fixture | FDR | xGI/90 | Fixture ease | Form | Captain? |")
-        out.append("|--------|---------|-----|--------|--------------|------|----------|")
+        out.append("| Player | Fixture | FDR | xGI/90 | Ease | Form | Opp goals conceded "
+                   "| Top managers captained | Score | Captain? |")
+        out.append("|--------|---------|-----|--------|------|------|--------------------"
+                   "|------------------------|-------|----------|")
         for p in ranked:
             el = el_by_id.get(p.id, {})
+            detail = cap_detail.get(p.id, {})
             fx = p.next_opp or "blank"
             fdr = f"{p.next_fdr:.0f}" if (p.next_n and p.next_fdr) else "—"
             ease = f"{p.next_attack_ease:.2f}×" if p.next_n else "— (blank)"
             ok = ("yes" if captain_eligible(p, el, horizon, None)
                   else "no (doubt / form dip)")
             out.append(f"| {p.name} ({p.team_short}) | {fx} | {fdr} | "
-                       f"{p.xgi90:.2f} | {ease} | {_f(el.get('form')):.1f} | {ok} |")
+                       f"{p.xgi90:.2f} | {ease} | {_f(el.get('form')):.1f} | "
+                       f"{detail.get('opp', 0):.1f} | {detail.get('top', 0) * 100:.0f}% | "
+                       f"{detail.get('score', 0):+.2f} | {ok} |")
     out.append("")
 
     if extra.strip():
@@ -751,8 +818,8 @@ def _main(argv: list[str] | None = None) -> int:
                         help="your free transfers this week (the public API can't "
                              "report this reliably; default 1)")
     parser.add_argument("--no-template", action="store_true",
-                        help="skip the elite-ownership template-holes section "
-                             "(faster; avoids reading top managers' squads)")
+                        help="skip the template-holes section (the top managers are "
+                             "still read for captaincy)")
     parser.add_argument("--top", type=int, default=TEMPLATE_TOP_N,
                         help=f"how many top managers to read for template holes "
                              f"(default {TEMPLATE_TOP_N})")
